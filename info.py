@@ -31,7 +31,7 @@ INDEX_CAPTION = bool(environ.get('SAVE_CAPTION', True)) # Save caption db when i
 #Making it false will not save caption in db SO you can save some storage space
 
 
-PICS = (environ.get('PICS', 'https://graph.org/file/56b5deb73f3b132e2bb73.jpg https://graph.org/file/5303692652d91d52180c2.jpg https://graph.org/file/425b6f46efc7c6d64105f.jpg https://graph.org/file/876867e761c6c7a29855b.jpg')).split()  # Sample pic
+PICS = (environ.get('PICS', 'https://graph.org/file/d482965bd5cc63ad9d89b-934ae96a92015c1a5d.jpg https://graph.org/file/50dc3ed568f136cf4860a-b4dad08f5a03410299.jpg https://graph.org/file/870e61e41e9dddb73269c-aa74d6f49b7f11c8c5.jpg https://graph.org/file/ffdc08983348b6b5dd7ce-8c6fc9d77f6dadc4dc.jpg https://graph.org/file/db716ce569228dfa568e5-15c8912120dd346752.jpg https://graph.org/file/ae7a9d2448f108cc6d1d1-b1345f5ffbacce507f.jpg https://graph.org/file/40acdbe3eb50c791c56aa-abaee4d3f20f4d5be1.jpg')).split()  # Sample pic
 NOR_IMG = environ.get("NOR_IMG", "https://graph.org/file/e20b5fdaf217252964202.jpg")
 MELCOW_PHOTO = environ.get("MELCOW_PHOTO", "https://graph.org/file/56b5deb73f3b132e2bb73.jpg")
 SPELL_IMG = environ.get("SPELL_IMG", "https://graph.org/file/13702ae26fb05df52667c.jpg")
