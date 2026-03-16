@@ -17,7 +17,7 @@ def is_enabled(value, default):
 # ============================
 # Bot Information Configuration
 # ============================
-SESSION = environ.get('SESSION', 'dreamxbotz_search')   # Session name for the bot
+SESSION = environ.get('SESSION', 'spiderman_search')   # Session name for the bot
 API_ID = int(environ.get('API_ID', '32557254')) # API ID from my.telegram.org
 API_HASH = environ.get('API_HASH', '448bb61d4711ef33afff691ac1bb0931')  # API Hash from my.telegram.org
 BOT_TOKEN = environ.get('BOT_TOKEN', "6129144336:AAHY4XHjUj7gdxvP5SHf_ttP8iuzB91Z8xc")    # Bot token from @BotFather
@@ -33,7 +33,7 @@ INDEX_CAPTION = bool(environ.get('SAVE_CAPTION', True)) # Save caption db when i
 
 PICS = (environ.get('PICS','https://graph.org/file/32eebd761ec6f46c09ac0-875fd9d7b055c84b80.jpg https://graph.org/file/0cdccfbaba849dc17ebf5-1bf153bf29616c375f.jpg https://graph.org/file/aea827b245bf4e03b5f82-d75d663fc2fd7c6f21.jpg https://graph.org/file/9f9ccc17f58828e5bfe6d-785ac0f08c59e7b657.jpg https://graph.org/file/01726bbb5c3a06f8a1ce5-0d159506ae99895050.jpg')).split()  # Sample pic
 NOR_IMG = environ.get("NOR_IMG", "https://graph.org/file/e20b5fdaf217252964202.jpg")
-MELCOW_PHOTO = environ.get("MELCOW_PHOTO", "https://graph.org/file/56b5deb73f3b132e2bb73.jpg")
+MELCOW_PHOTO = environ.get("MELCOW_PHOTO", "https://graph.org/file/a224fbff472c66807eccb-0ff91a6f7a49c9144b.jpg")
 SPELL_IMG = environ.get("SPELL_IMG", "https://graph.org/file/13702ae26fb05df52667c.jpg")
 SUBSCRIPTION = (environ.get('SUBSCRIPTION', 'https://graph.org/file/242b7f1b52743938d81f1.jpg'))
 FSUB_PICS = (environ.get('FSUB_PICS', 'https://graph.org/file/7478ff3eac37f4329c3d8.jpg https://graph.org/file/56b5deb73f3b132e2bb73.jpg')).split()  # Fsub pic
