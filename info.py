@@ -163,6 +163,32 @@ BUTTON_MODE = is_enabled((environ.get('BUTTON_MODE', "True")), True) # pm & Grou
 STREAM_MODE = bool(environ.get('STREAM_MODE', True)) # Set Stream mode True or False
 PREMIUM_STREAM_MODE = bool(environ.get('PREMIUM_STREAM_MODE', False)) # Set Stream mode True or False only for premium users
 
+LANGUAGES = {"ᴍᴀʟᴀʏᴀʟᴀᴍ":"mal","ᴛᴀᴍɪʟ":"tam","ᴇɴɢʟɪsʜ":"eng","ʜɪɴᴅɪ":"hin","ᴛᴇʟᴜɢᴜ":"tel","ᴋᴀɴɴᴀᴅᴀ":"kan","ɢᴜᴊᴀʀᴀᴛɪ":"guj","ᴍᴀʀᴀᴛʜɪ":"mar","ᴘᴜɴᴊᴀʙɪ":"pun"}
+QUALITIES = ["360P", "480P", "720P", "1080P", "1440P", "2160P", "4K"]
+
+SEASON_COUNT = 12
+SEASONS = [f"S{str(i).zfill(2)}" for i in range(1, SEASON_COUNT + 1)]
+
+BAD_WORDS = {
+    "PrivateMovieZ",
+    "toonworld4all",
+    "themoviesboss",
+    "1tamilmv",
+    "tamilblasters",
+    "1tamilblasters",
+    "skymovieshd",
+    "extraflix",
+    "hdm2",
+    "moviesmod",
+    "hdhub4u",
+    "mkvcinemas",
+    "primefix",
+    "join",
+    "www",
+    "villa",
+    "tg",
+    "original"
+} # Set of bad words to filter out
 
 # ============================
 # Server & Web Configuration
