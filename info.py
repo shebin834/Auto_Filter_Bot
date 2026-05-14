@@ -80,6 +80,7 @@ COLLECTION_NAME = environ.get('COLLECTION_NAME', 'MalluTeaters_files') # Collect
 # If MULTIPLE_DB Is True Then Fill DATABASE_URI2 Value Else You Will Get Error.
 MULTIPLE_DB = is_enabled(os.environ.get('MULTIPLE_DB', "True"), True) # Type True For Turn On MULTIPLE DB FUNTION 
 DATABASE_URI2 = environ.get('DATABASE_URI2', "mongodb://Shebin:Shebin%408156@localhost:27017/admin?authSource=admin")  # MongoDB URI for the second database (if MULTIPLE_DB is True)
+
 # ============================
 # Movie Notification & Update Settings
 # ============================
@@ -137,7 +138,7 @@ PREMIUM_USER = [int(user) if id_pattern.search(user) else user for user in envir
 ULTRA_FAST_MODE = is_enabled(environ.get('ULTRA_FAST_MODE', "True"), True) # Set to True for fast search, False for original search
 
 MAX_B_TN = environ.get("MAX_B_TN", "5") # Maximum number of buttons in a row (default: 5)
-PORT = int(environ.get("PORT", "8081"))  # Port for the web server (default: 8080)
+PORT = int(environ.get("PORT", "8080"))  # PORT 8080 IS BEST FOR RENDER
 MSG_ALRT = environ.get('MSG_ALRT', 'Share & Support Us ♥️') # Alert message for users
 DELETE_TIME = int(environ.get("DELETE_TIME", "300"))  #  deletion time in seconds (default: 5 minutes). Adjust as per your needs.
 CUSTOM_FILE_CAPTION = environ.get("CUSTOM_FILE_CAPTION", f"{script.CAPTION}")   # Custom caption for files
@@ -164,42 +165,6 @@ PREMIUM_STREAM_MODE = bool(environ.get('PREMIUM_STREAM_MODE', False)) # Set Stre
 
 
 # ============================
-# Bot Configuration
-# ============================
-
-AUTH_REQ_CHANNELS = [int(ch) for ch in auth_req_channels.split() if ch and id_pattern.match(ch)] 
-AUTH_CHANNELS = [int(ch) for ch in auth_channels.split() if ch and id_pattern.match(ch)]
-REQST_CHANNEL = int(reqst_channel) if reqst_channel and id_pattern.search(reqst_channel) else None
-SUPPORT_CHAT_ID = int(support_chat_id) if support_chat_id and id_pattern.search(support_chat_id) else None
-LANGUAGES = {"ᴍᴀʟᴀʏᴀʟᴀᴍ":"mal","ᴛᴀᴍɪʟ":"tam","ᴇɴɢʟɪsʜ":"eng","ʜɪɴᴅɪ":"hin","ᴛᴇʟᴜɢᴜ":"tel","ᴋᴀɴɴᴀᴅᴀ":"kan","ɢᴜᴊᴀʀᴀᴛɪ":"guj","ᴍᴀʀᴀᴛʜɪ":"mar","ᴘᴜɴᴊᴀʙɪ":"pun"}
-QUALITIES = ["360P", "480P", "720P", "1080P", "1440P", "2160P", "4K"]
-
-SEASON_COUNT = 12
-SEASONS = [f"S{str(i).zfill(2)}" for i in range(1, SEASON_COUNT + 1)]
-
-BAD_WORDS = {
-    "PrivateMovieZ",
-    "toonworld4all",
-    "themoviesboss",
-    "1tamilmv",
-    "tamilblasters",
-    "1tamilblasters",
-    "skymovieshd",
-    "extraflix",
-    "hdm2",
-    "moviesmod",
-    "hdhub4u",
-    "mkvcinemas",
-    "primefix",
-    "join",
-    "www",
-    "villa",
-    "tg",
-    "original"
-} # Set of bad words to filter out
-   
-
-# ============================
 # Server & Web Configuration
 # ============================
 
@@ -211,7 +176,7 @@ if 'DYNO' in environ:
 else:
     ON_HEROKU = False
 BIND_ADRESS = str(getenv('WEB_SERVER_BIND_ADDRESS', '0.0.0.0'))
-FQDN = str(getenv('FQDN', BIND_ADRESS)) if not ON_HEROKU or getenv('FQDN') else APP_NAME+'.herokuapp.com'
+FQDN = str(getenv('FQDN', 'auto-filter-bot.onrender.com')) # SET RENDER URL HERE
 URL = "https://{}/".format(FQDN) if ON_HEROKU or NO_PORT else "https://{}/".format(FQDN, PORT)
 SLEEP_THRESHOLD = int(environ.get('SLEEP_THRESHOLD', '60'))
 WORKERS = int(environ.get('WORKERS', '4'))
@@ -225,10 +190,9 @@ if 'DYNO' in environ:
 else:
     ON_HEROKU = False
 HAS_SSL = bool(getenv('HAS_SSL', True))
-if HAS_SSL:
-    URL = "https://{}/".format(FQDN)
-else:
-    URL = "http://{}/".format(FQDN)
+
+# DIRECT URL ASSIGNMENT FOR RENDER
+URL = environ.get("URL", "https://auto-filter-bot.onrender.com/")
 
 # ============================
 # Reactions Configuration
@@ -262,11 +226,10 @@ Bot_cmds = {
     "trial_reset": "User Trial Reset"
 }
 
-
 #Don't Change Anything Here
 if MULTIPLE_DB == True:
     DATABASE_URI = DATABASE_URI
-    DATABASE_URI2 = DATABASE_URI
+    DATABASE_URI2 = DATABASE_URI2
 else:
     DATABASE_URI = DATABASE_URI
     DATABASE_URI2 = DATABASE_URI2
