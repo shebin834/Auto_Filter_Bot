@@ -177,6 +177,7 @@ async def latest_search_callback(client: Client, query: CallbackQuery):
     files, _, _ = await get_search_results(chat_id, movie_title, max_results=10)
     
     if files:
+        await query.answer()
         # Redirect query message text to trigger auto_filter layout
         fake_msg = query.message
         fake_msg.text = movie_title
