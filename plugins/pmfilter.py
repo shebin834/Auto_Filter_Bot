@@ -1957,7 +1957,9 @@ async def auto_filter(client, msg, spoll=False):
         key = f"{message.chat.id}-{message.id}"
         FRESH[key] = search
         temp.GETALL[key] = files
-        temp.SHORT[message.from_user.id] = message.chat.id
+        from_u = getattr(message, 'from_user', None)
+        if from_u and hasattr(from_u, 'id') and from_u.id:
+            temp.SHORT[from_u.id] = message.chat.id
 
         if settings.get('button'):
             btn = [
