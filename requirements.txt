@@ -35,6 +35,8 @@ pyromod
 colorama
 fuzzywuzzy
 Levenshtein==0.24.0
+google-generativeai
+rapidfuzz
 
 
 # Git-based Packages

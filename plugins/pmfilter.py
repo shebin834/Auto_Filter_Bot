@@ -1,11 +1,96 @@
+from pyrogram import Client, filters, enums, ContinuePropagation
 from utils import get_size, is_subscribed, is_req_subscribed, group_setting_buttons, get_poster, get_posterx, temp, get_settings, save_group_settings, get_cap, imdb, is_check_admin, extract_request_content, log_error, clean_filename, generate_season_variations, clean_search_text
 import tracemalloc
 from fuzzywuzzy import process
 from dreamxbotz.util.file_properties import get_name, get_hash
 from urllib.parse import quote_plus
 import logging
-from database.ia_filterdb import Media, Media2, get_file_details, get_search_results, get_bad_files
+from database.ia_filterdb import Media, Media2, get_file_details, get_search_results, get_bad_files, dreamxbotz_get_movies
 from database.config_db import mdb
+
+# ----------------------------------------------------
+# AI and OTT custom helpers
+# ----------------------------------------------------
+from database.ai_db import ai_db
+from ai.ai_handler import (
+    is_user_rate_limited,
+    get_ott_info,
+    get_spoiler_free_summary,
+    get_similar_movies
+)
+
+_local_movie_titles_cache = set()
+_last_cache_refresh = None
+
+async def refresh_local_movies_cache():
+    global _local_movie_titles_cache, _last_cache_refresh
+    now = datetime.now()
+    if _last_cache_refresh is None or (now - _last_cache_refresh > timedelta(hours=6)):
+        try:
+            titles = await dreamxbotz_get_movies(limit=1000)
+            _local_movie_titles_cache = set(titles)
+            _last_cache_refresh = now
+            logger.info("Refreshed local movies cache: %d titles loaded", len(titles))
+        except Exception as e:
+            logger.error("Failed to refresh local movies cache: %s", e)
+
+async def run_local_fuzzy_search(query: str) -> str:
+    from rapidfuzz import process, utils
+    await refresh_local_movies_cache()
+    if not _local_movie_titles_cache:
+        return None
+    try:
+        match = process.extractOne(
+            query, 
+            _local_movie_titles_cache, 
+            processor=utils.default_process,
+            score_cutoff=85.0
+        )
+        if match:
+            return match[0]
+    except Exception as e:
+        logger.error("Error in run_local_fuzzy_search: %s", e)
+    return None
+
+async def track_file_download_interest(user_id: int, file_id: str):
+    try:
+        from database.ia_filterdb import get_file_details
+        files_ = await get_file_details(file_id)
+        if not files_:
+            return
+        file = files_[0]
+        file_name = file.file_name
+        
+        # Parse language
+        lang = None
+        for display_name, code in LANGUAGES.items():
+            if code in file_name.lower() or display_name.split()[0].lower() in file_name.lower():
+                lang = display_name
+                break
+                
+        # Parse genre
+        genre = None
+        genres_list = ["Action", "Comedy", "Drama", "Romance", "Thriller", "Horror", "Sci-Fi", "Fantasy", "Animation", "Family"]
+        for g in genres_list:
+            if g.lower() in file_name.lower():
+                genre = g
+                break
+                
+        await ai_db.log_event("download", user_id, file_name, {"language": lang, "genre": genre})
+        
+        # Update user profile interests
+        from database.users_chats_db import db as udb
+        update_fields = {}
+        if lang:
+            update_fields[f"interests.languages.{lang}"] = 1
+        if genre:
+            update_fields[f"interests.genres.{genre}"] = 1
+            
+        if update_fields:
+            await udb.col.update_one({"id": int(user_id)}, {"$inc": update_fields}, upsert=True)
+    except Exception as e:
+        logger.error("Error in track_file_download_interest: %s", e)
+# ----------------------------------------------------
 from pyrogram.errors import FloodWait, UserIsBlocked, MessageNotModified, PeerIdInvalid, ChatAdminRequired, UserNotParticipant
 from pyrogram import Client, filters, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputMediaPhoto, WebAppInfo
@@ -40,12 +125,27 @@ SPELL_CHECK = {}
 
 @Client.on_message(filters.group & filters.text & filters.incoming)
 async def give_filter(client, message):
+    logger.info("DEBUG give_filter: Entered group message handler")
     if EMOJI_MODE:
         try:
+            logger.info("DEBUG give_filter: Trying first reaction")
             await message.react(emoji=random.choice(REACTIONS), big=True)
-        except Exception:
-            await message.react(emoji="⚡️", big=True)
-    await mdb.update_top_messages(message.from_user.id, message.text)
+            logger.info("DEBUG give_filter: First reaction succeeded")
+        except Exception as e:
+            logger.info(f"DEBUG give_filter: First reaction failed: {e}. Trying fallback reaction")
+            try:
+                await message.react(emoji="⚡️", big=True)
+                logger.info("DEBUG give_filter: Fallback reaction succeeded")
+            except Exception:
+                logger.warning("Fallback reaction also failed. Continuing...")
+                pass
+    logger.info("DEBUG give_filter: Reaction block finished successfully")
+    try:
+        user_id_val = message.from_user.id if message.from_user else 0
+        await mdb.update_top_messages(user_id_val, message.text)
+    except Exception as e:
+        logger.error(f"Failed to update top messages: {e}")
+
     if message.chat.id != SUPPORT_CHAT_ID:
         settings = await get_settings(message.chat.id)
         try:
@@ -63,7 +163,7 @@ async def give_filter(client, message):
         if total_results == 0:
             return
         await message.reply_text(
-            f"<b>Hᴇʏ {message.from_user.mention},\n\n"
+            f"<b>Hᴇʏ {message.from_user.mention if message.from_user else 'User'},\n\n"
             f"ʏᴏᴜʀ ʀᴇǫᴜᴇꜱᴛ ɪꜱ ᴀʟʀᴇᴀᴅʏ ᴀᴠᴀɪʟᴀʙʟᴇ ✅\n\n"
             f"📂 ꜰɪʟᴇꜱ ꜰᴏᴜɴᴅ : {str(total_results)}\n"
             f"🔍 ꜱᴇᴀʀᴄʜ :</b> <code>{search}</code>\n\n"
@@ -78,17 +178,31 @@ async def give_filter(client, message):
 async def pm_text(bot, message):
     bot_id = bot.me.id
     content = message.text
-    user = message.from_user.first_name
-    user_id = message.from_user.id
+    user = message.from_user.first_name if message.from_user else "User"
+    user_id = message.from_user.id if message.from_user else 0
+    logger.info("DEBUG pm_text: Entered PM message handler")
     if EMOJI_MODE:
         try:
+            logger.info("DEBUG pm_text: Trying first reaction")
             await message.react(emoji=random.choice(REACTIONS), big=True)
-        except Exception:
-            await message.react(emoji="⚡️", big=True)
+            logger.info("DEBUG pm_text: First reaction succeeded")
+        except Exception as e:
+            logger.info(f"DEBUG pm_text: First reaction failed: {e}. Trying fallback reaction")
+            try:
+                await message.react(emoji="⚡️", big=True)
+                logger.info("DEBUG pm_text: Fallback reaction succeeded")
+            except Exception:
+                logger.warning("Fallback reaction also failed. Continuing...")
+                pass
+    logger.info("DEBUG pm_text: Reaction block finished successfully")
     if content.startswith(("#")):
         return
     try:
         await mdb.update_top_messages(user_id, content)
+    except Exception as e:
+        logger.error(f"Failed mdb.update_top_messages in PM: {e}")
+
+    try:
         pm_search = await db.pm_search_status(bot_id)
         if pm_search:
             await auto_filter(bot, message)
@@ -96,22 +210,22 @@ async def pm_text(bot, message):
             await message.reply_text(
                 text=(
                     f"<b>🙋 ʜᴇʏ {user} 😍 ,\n\n"
-                    "𝒀𝒐𝒖 𝒄𝒂𝒏 𝒔𝒆𝒂𝒓𝒄𝒉 𝒇𝒐𝒓 𝒎𝒐𝒗𝒊𝒆𝒔 𝒐𝒏𝒍𝒚 𝒐𝒏 𝒐𝒖𝒓 𝑴𝒐𝒗𝒊𝒆 𝑮𝒓𝒐𝒖𝒑. 𝒀𝒐𝒖 𝒂𝒓𝒆 𝒏𝒐𝒕 𝒂𝒍𝒍𝒐𝒘𝒆𝒅 𝒕𝒐 𝒔𝒆𝒂𝒓𝒄𝒉 𝒇𝒐𝒓 𝒎𝒐𝒗𝒊𝒆𝒔 𝒐𝒏 𝑫𝒊𝒓𝒆𝒄𝒕 𝑩𝒐𝒕. 𝑷𝒍𝒆𝒂𝒔𝒆 𝒋𝒐𝒊𝒏 𝒐𝒖𝒓 𝒎𝒐𝒗𝒊𝒆 𝒈𝒓𝒐𝒖𝒑 𝒃𝒚 𝒄𝒍𝒊𝒄𝒌𝒊𝒏𝒈 𝒐𝒏 𝒕𝒉𝒆  𝑹𝑬𝑸𝑼𝑬𝑺𝑻 𝑯𝑬𝑹𝑬 𝒃𝒖𝒕𝒕𝒐𝒏 𝒈𝒊𝒗𝒆𝒏 𝒃𝒆𝒍𝒐𝒘 𝒂𝒏𝒅 𝒔𝒆𝒂𝒓𝒄𝒉 𝒚𝒐𝒖𝒓 𝒇𝒂𝒗𝒐𝒓𝒊𝒕𝒆 𝒎𝒐𝒗𝒊𝒆 𝒕𝒉𝒆𝒓𝒆 👇\n\n"
-                    "<blockquote>"
-                    "आप केवल हमारे 𝑴𝒐𝒗𝒊𝒆 𝑮𝒓𝒐𝒖𝒑 पर ही 𝑴𝒐𝒗𝒊𝒆 𝑺𝒆𝒂𝒓𝒄𝒉 कर सकते हो । "
-                    "आपको 𝑫𝒊𝒓𝒆𝒄𝒕 𝑩𝒐𝒕 पर 𝑴𝒐𝒗𝒊𝒆 𝑺𝒆𝒂𝒓𝒄𝒉 करने की 𝑷𝒆𝒓𝒎𝒊𝒔𝒔𝒊𝒐𝒏 नहीं है कृपया नीचे दिए गए 𝑹𝑬𝑸𝑼𝑬𝑺𝑻 𝑯𝑬𝑹𝑬 वाले 𝑩𝒖𝒕𝒕𝒐𝒏 पर क्लिक करके हमारे 𝑴𝒐𝒗𝒊𝒆 𝑮𝒓𝒐𝒖𝒑 को 𝑱𝒐𝒊𝒏 करें और वहां पर अपनी मनपसंद 𝑴𝒐𝒗𝒊𝒆 𝑺𝒆𝒂𝒓𝒄𝒉 सर्च करें ।"
-                    "</blockquote></b>"
+                    "𝒀𝒐𝒖 𝒄𝒂𝒏 𝒔𝒆𝒂𝒓𝒄𝒉 𝒇𝒐𝒓 𝒎𝒐𝒗𝒊𝒆𝒔 𝒐𝒏𝒍𝒚 𝒐𝒏 𝒐𝒖𝒓 𝑴𝒐𝒗𝒊𝒆 𝑮𝒓𝒐𝒖𝒑. 𝒀𝒐𝒖 𝒂𝒓𝒆 𝒏𝒐𝒕 𝒂𝒍𝒍𝒐𝒘𝒆𝒅 𝒕𝒐 𝒔𝒆𝒂𝒓𝒄𝒉 𝒇𝒐𝒓 𝒎𝒐𝒗𝒊𝒆𝒔 𝒐𝒏 𝑫𝒊𝒓𝒆𝒄𝒕 𝑩𝒐𝒕. 𝑷𝒍𝒆𝒂𝒔𝒆 𝒋𝒐𝒊𝒏 𝒐𝒖𝒓 𝒎𝒐𝒗𝒊𝒆 𝒈𝒓𝒐𝒖𝒑 𝒃𝒚 𝒄𝒍𝒊𝒄𝒌𝒊𝒏𝒈 𝒐𝒏 𝒕𝒉𝒆  𝑹𝑬𝑸𝑼𝑬𝑺𝑻 𝑯𝑬𝑹𝑬 𝒃𝒖𝒕𝒕𝒐𝒏 𝒈𝒊𝒗𝒆𝒏 𝒃𝒆𝒍𝒐𝒘 𝒂𝒏𝒅 𝒔𝒆𝒂𝒓𝒄𝒉 ʏᴏᴜʀ 𝒇𝒂𝒗𝒐𝒓𝒊𝒕𝒆 𝒎𝒐𝒗𝒊𝒆 𝒕𝒉𝒆𝒓𝒆 👇\n\n"
                 ), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 ʀᴇǫᴜᴇsᴛ ʜᴇʀᴇ ", url=GRP_LNK)]]))
-            await bot.send_message(chat_id=LOG_CHANNEL,
-                                   text=(
-                                       f"<b>#𝐏𝐌_𝐌𝐒𝐆\n\n"
-                                       f"👤 Nᴀᴍᴇ : {user}\n"
-                                       f"🆔 ID : {user_id}\n"
-                                       f"💬 Mᴇssᴀɢᴇ : {content}</b>"
-                                   )
-                                   )
-    except Exception:
-        pass
+            try:
+                await bot.send_message(
+                    chat_id=LOG_CHANNEL,
+                    text=(
+                        f"<b>#𝐏𝐌_𝐌𝐒𝐆\n\n"
+                        f"👤 Nᴀᴍᴇ : {user}\n"
+                        f"🆔 ID : {user_id}\n"
+                        f"💬 Mᴇssᴀɢᴇ : {content}</b>"
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Failed to log PM message to LOG_CHANNEL: {e}")
+    except Exception as e:
+        logger.exception(f"Error handling PM text message: {e}")
 
 
 @Client.on_callback_query(filters.regex(r"^reffff"))
@@ -143,8 +257,6 @@ async def refercall(bot, query):
 async def next_page(bot, query):
     ident, req, key, offset = query.data.split("_")
     curr_time = datetime.now(pytz.timezone('Asia/Kolkata')).time()
-    if int(req) not in [query.from_user.id, 0]:
-        return await query.answer(script.ALRT_TXT.format(query.from_user.first_name), show_alert=True)
     try:
         offset = int(offset)
     except:
@@ -154,8 +266,7 @@ async def next_page(bot, query):
     else:
         search = FRESH.get(key)
     if not search:
-        await query.answer(script.OLD_ALRT_TXT.format(query.from_user.first_name), show_alert=True)
-        return
+        return await query.answer("🔄 Please try searching again", show_alert=True)
     files, n_offset, total = await get_search_results(query.message.chat.id, search, offset=offset, filter=True)
     try:
         n_offset = int(n_offset)
@@ -163,7 +274,7 @@ async def next_page(bot, query):
         n_offset = 0
 
     if not files:
-        return
+        return await query.answer("🚫 ɴᴏ ᴍᴏʀᴇ ꜰɪʟᴇꜱ ꜰᴏᴜɴᴅ 🚫", show_alert=True)
     temp.GETALL[key] = files
     temp.SHORT[query.from_user.id] = query.message.chat.id
     settings = await get_settings(query.message.chat.id)
@@ -352,8 +463,6 @@ async def next_page(bot, query):
 @Client.on_callback_query(filters.regex(r"^spol"))
 async def advantage_spoll_choker(bot, query):
     _, id, user = query.data.split('#')
-    if int(user) != 0 and query.from_user.id != int(user):
-        return await query.answer(script.ALRT_TXT.format(query.from_user.first_name), show_alert=True)
     movies = await get_posterx(id, id=True) if TMDB_ON_SEARCH else await get_poster(id, id=True)
     movie = movies.get('title')
     movie = re.sub(r"[:-]", " ", movie)
@@ -380,18 +489,22 @@ async def advantage_spoll_choker(bot, query):
 # Qualities
 @Client.on_callback_query(filters.regex(r"^qualities#"))
 async def qualities_cb_handler(client: Client, query: CallbackQuery):
+    logger.info(f"DEBUG qualities_cb_handler: DATA = {query.data}")
     try:
-        if int(query.from_user.id) not in [query.message.reply_to_message.from_user.id, 0]:
-            return await query.answer(
-                f"⚠️ ʜᴇʟʟᴏ {query.from_user.first_name},\n"
-                f"ᴛʜɪꜱ ɪꜱ ɴᴏᴛ ʏᴏᴜʀ ᴍᴏᴠɪᴇ ʀᴇǫᴜᴇꜱᴛ,\nʀᴇǫᴜᴇꜱᴛ ʏᴏᴜʀ'ꜱ...",
-                show_alert=True,
-            )
-    except:
+        if query.message.reply_to_message and query.message.reply_to_message.from_user:
+            if int(query.from_user.id) not in [query.message.reply_to_message.from_user.id, 0]:
+                return await query.answer(
+                    f"⚠️ ʜᴇʟʟᴏ {query.from_user.first_name},\n"
+                    f"ᴛʜɪꜱ ɪꜱ ɴᴏᴛ ʏᴏᴜʀ ᴍᴏᴠɪᴇ ʀᴇǫᴜᴇꜱᴛ,\nʀᴇǫᴜᴇꜱᴛ ʏᴏᴜʀ'ꜱ...",
+                    show_alert=True,
+                )
+    except Exception:
         pass
 
     _, key = query.data.split("#")
-    search = FRESH.get(key)
+    search = FRESH.get(key) or BUTTONS.get(key)
+    if not search:
+        return await query.answer(script.OLD_ALRT_TXT.format(query.from_user.first_name), show_alert=True)
     search = search.replace(' ', '_')
 
     btn = []
@@ -414,13 +527,16 @@ async def qualities_cb_handler(client: Client, query: CallbackQuery):
     ])
 
     await query.edit_message_reply_markup(InlineKeyboardMarkup(btn))
+    await query.answer()
 
 
 @Client.on_callback_query(filters.regex(r"^fq#"))
 async def filter_qualities_cb_handler(client: Client, query: CallbackQuery):
     _, qual, key = query.data.split("#")
     curr_time = datetime.now(pytz.timezone('Asia/Kolkata')).time()
-    search = FRESH.get(key)
+    search = FRESH.get(key) or BUTTONS.get(key)
+    if not search:
+        return await query.answer(script.OLD_ALRT_TXT.format(query.from_user.first_name), show_alert=True)
     search = search.replace("_", " ")
     baal = qual in search
     if baal:
@@ -430,11 +546,6 @@ async def filter_qualities_cb_handler(client: Client, query: CallbackQuery):
     req = query.from_user.id
     chat_id = query.message.chat.id
     message = query.message
-    try:
-        if int(query.from_user.id) not in [query.message.reply_to_message.from_user.id, 0]:
-            return await query.answer(f"⚠️ ʜᴇʟʟᴏ {query.from_user.first_name},\nᴛʜɪꜱ ɪꜱ ɴᴏᴛ ʏᴏᴜʀ ᴍᴏᴠɪᴇ ʀᴇǫᴜᴇꜱᴛ,\nʀᴇǫᴜᴇꜱᴛ ʏᴏᴜʀ'ꜱ...", show_alert=True,)
-    except:
-        pass
     if qual != "homepage":
         search = f"{search} {qual}"
     BUTTONS[key] = search
@@ -540,18 +651,10 @@ async def filter_qualities_cb_handler(client: Client, query: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^languages#"))
 async def languages_cb_handler(client: Client, query: CallbackQuery):
-    try:
-        if int(query.from_user.id) not in [query.message.reply_to_message.from_user.id, 0]:
-            return await query.answer(
-                f"⚠️ ʜᴇʟʟᴏ {query.from_user.first_name},\n"
-                f"ᴛʜɪꜱ ɪꜱ ɴᴏᴛ ʏᴏᴜʀ ᴍᴏᴠɪᴇ ʀᴇǫᴜᴇꜱᴛ,\nʀᴇǫᴜᴇꜱᴛ ʏᴏᴜʀ'ꜱ...",
-                show_alert=True,
-            )
-    except:
-        pass
-
     _, key = query.data.split("#")
-    search = FRESH.get(key)
+    search = FRESH.get(key) or BUTTONS.get(key)
+    if not search:
+        return await query.answer(script.OLD_ALRT_TXT.format(query.from_user.first_name), show_alert=True)
     search = search.replace(' ', '_')
 
     items = list(LANGUAGES.items())
@@ -573,13 +676,16 @@ async def languages_cb_handler(client: Client, query: CallbackQuery):
                callback_data=f"fl#homepage#{key}")])
 
     await query.edit_message_reply_markup(InlineKeyboardMarkup(btn))
+    await query.answer()
 
 
 @Client.on_callback_query(filters.regex(r"^fl#"))
 async def filter_languages_cb_handler(client: Client, query: CallbackQuery):
     _, lang, key = query.data.split("#")
     curr_time = datetime.now(pytz.timezone('Asia/Kolkata')).time()
-    search = FRESH.get(key)
+    search = FRESH.get(key) or BUTTONS.get(key)
+    if not search:
+        return await query.answer(script.OLD_ALRT_TXT.format(query.from_user.first_name), show_alert=True)
     search = search.replace("_", " ")
     baal = lang in search
     if baal:
@@ -589,11 +695,6 @@ async def filter_languages_cb_handler(client: Client, query: CallbackQuery):
     req = query.from_user.id
     chat_id = query.message.chat.id
     message = query.message
-    try:
-        if int(query.from_user.id) not in [query.message.reply_to_message.from_user.id, 0]:
-            return await query.answer(f"⚠️ ʜᴇʟʟᴏ {query.from_user.first_name},\nᴛʜɪꜱ ɪꜱ ɴᴏᴛ ʏᴏᴜʀ ᴍᴏᴠɪᴇ ʀᴇǫᴜᴇꜱᴛ,\nʀᴇǫᴜᴇꜱᴛ ʏᴏᴜʀ'ꜱ...", show_alert=True,)
-    except:
-        pass
     if lang != "homepage":
         search = f"{search} {lang}"
     BUTTONS[key] = search
@@ -693,16 +794,11 @@ async def filter_languages_cb_handler(client: Client, query: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^seasons#"))
 async def seasons_cb_handler(client: Client, query: CallbackQuery):
-    try:
-        if int(query.from_user.id) not in [query.message.reply_to_message.from_user.id, 0]:
-            return await query.answer(
-                f"⚠️ ʜᴇʟʟᴏ {query.from_user.first_name},\nᴛʜɪꜱ ɪꜱ ɴᴏᴛ ʏᴏᴜʀ ᴍᴏᴠɪᴇ ʀᴇǫᴜᴇꜱᴛ,\nʀᴇǫᴜᴇꜱᴛ ʏᴏᴜʀ'ꜱ…",
-                show_alert=True,
-            )
-    except Exception:
-        pass
     _, key = query.data.split("#")
-    search = FRESH.get(key).replace(" ", "_")
+    search = FRESH.get(key) or BUTTONS.get(key)
+    if not search:
+        return await query.answer(script.OLD_ALRT_TXT.format(query.from_user.first_name), show_alert=True)
+    search = search.replace(" ", "_")
     req = query.from_user.id
     offset = 0
     btn: list[list[InlineKeyboardButton]] = []
@@ -727,7 +823,10 @@ async def seasons_cb_handler(client: Client, query: CallbackQuery):
 @Client.on_callback_query(filters.regex(r"^fs#"))
 async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
     _, season_tag, key = query.data.split("#")
-    search = FRESH.get(key).replace("_", " ")
+    search = FRESH.get(key) or BUTTONS.get(key)
+    if not search:
+        return await query.answer(script.OLD_ALRT_TXT.format(query.from_user.first_name), show_alert=True)
+    search = search.replace("_", " ")
     season_tag = season_tag.lower()
     if season_tag == "homepage":
         search_final = search
@@ -738,12 +837,6 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
         search_final = query_input[0] if query_input else search
 
     BUTTONS[key] = search_final
-    try:
-        if int(query.from_user.id) not in [query.message.reply_to_message.from_user.id, 0]:
-            return await query.answer("⚠️ Not your request", show_alert=True)
-    except Exception:
-        pass
-
     chat_id = query.message.chat.id
     req = query.from_user.id
     files, n_offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True)
@@ -836,70 +929,133 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
 
 @Client.on_callback_query()
 async def cb_handler(client: Client, query: CallbackQuery):
+    logger.info(f"DEBUG cb_handler: RECEIVED CALLBACK DATA = {query.data} FROM USER = {query.from_user.id}")
     DreamxData = query.data
     try:
         link = await client.create_chat_invite_link(int(REQST_CHANNEL))
     except:
         pass
     if query.data == "close_data":
-        try:
-            user = query.message.reply_to_message.from_user.id
-        except:
-            user = query.from_user.id
-        if int(user) != 0 and query.from_user.id != int(user):
-            return await query.answer(script.NT_ALRT_TXT, show_alert=True)
         await query.answer("ᴛʜᴀɴᴋs ꜰᴏʀ ᴄʟᴏsᴇ 🙈")
         await query.message.delete()
         try:
             await query.message.reply_to_message.delete()
-        except:
+        except Exception:
             pass
 
-    elif query.data == "pages":
-        await query.answer("ᴛʜɪs ɪs ᴘᴀɢᴇs ʙᴜᴛᴛᴏɴ 😅")
-
-    elif query.data == "hiding":
-        await query.answer("ʙᴇᴄᴀᴜsᴇ ᴏғ ʟᴀɢᴛᴇ ғɪʟᴇs ɪɴ ᴅᴀᴛᴀʙᴀsᴇ,🙏\nɪᴛ ᴛᴀᴋᴇꜱ ʟɪᴛᴛʟᴇ ʙɪᴛ ᴛɪᴍᴇ",show_alert=True)
+    elif query.data in ["pages", "hiding", "ident"]:
+        await query.answer("📢 Please Share & Support Our Bot! ❤️", show_alert=True)
 
     elif query.data == "delallcancel":
-        userid = query.from_user.id
-        chat_type = query.message.chat.type
-        if chat_type == enums.ChatType.PRIVATE:
+        await query.message.delete()
+        try:
             await query.message.reply_to_message.delete()
-            await query.message.delete()
-        elif chat_type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
-            grp_id = query.message.chat.id
-            st = await client.get_chat_member(grp_id, userid)
-            if (st.status == enums.ChatMemberStatus.OWNER) or (str(userid) in ADMINS):
-                await query.message.delete()
-                try:
-                    await query.message.reply_to_message.delete()
-                except:
-                    pass
-            else:
-                await query.answer("Tʜᴀᴛ's ɴᴏᴛ ғᴏʀ ʏᴏᴜ!!", show_alert=True)
+        except Exception:
+            pass
+        await query.answer("Cancelled!")
 
-    if query.data.startswith("file"):
+    elif query.data.startswith("file"):
         ident, file_id = query.data.split("#")
-        user = query.message.reply_to_message.from_user.id if query.message.reply_to_message else query.from_user.id
-        if int(user) != 0 and query.from_user.id != int(user):
-            return await query.answer(script.ALRT_TXT.format(query.from_user.first_name), show_alert=True)
-        await query.answer(url=f"https://t.me/{temp.U_NAME}?start=file_{query.message.chat.id}_{file_id}")
+        # Track file download interest in background
+        asyncio.create_task(track_file_download_interest(query.from_user.id, file_id))
+        
+        if query.message.chat.type == enums.ChatType.PRIVATE:
+            await query.answer("⚡ Sending requested file...")
+            files_ = await get_file_details(file_id)
+            if not files_:
+                return await query.message.reply_text('<b><i>ɴᴏ ꜱᴜᴄʜ ꜰɪʟᴇ ᴇxɪꜱᴛꜱ !</i></b>')
+            files = files_[0]
+            title = clean_filename(files.file_name)
+            size = get_size(files.file_size)
+            f_caption = files.caption
+            settings = await get_settings(query.message.chat.id)
+            DREAMX_CAPTION = settings.get('caption', CUSTOM_FILE_CAPTION)
+            if DREAMX_CAPTION:
+                try:
+                    f_caption = DREAMX_CAPTION.format(file_name='' if title is None else title, file_size='' if size is None else size, file_caption='' if f_caption is None else f_caption)
+                except Exception as e:
+                    logger.exception(e)
+            if not f_caption:
+                f_caption = f"<code>{title}</code>"
+            
+            btn = [[InlineKeyboardButton('🍿 ᴏᴛᴛ ᴍᴏᴠɪᴇ ᴜᴘᴅᴀᴛᴇꜱ ᴄʜᴀɴɴᴇʟ 🍿', url=UPDATE_CHNL_LNK)]]
+            try:
+                msg = await client.send_cached_media(
+                    chat_id=query.from_user.id,
+                    file_id=files.file_id,
+                    caption=f_caption,
+                    protect_content=settings.get('file_secure', PROTECT_CONTENT),
+                    reply_markup=InlineKeyboardMarkup(btn)
+                )
+                del_msg = await msg.reply(script.DEL_MSG.format(get_time(DELETE_TIME)), quote=True, parse_mode=enums.ParseMode.HTML)
+                if settings.get('auto_delete', True):
+                    asyncio.create_task(_schedule_delete(msg, del_msg, DELETE_TIME))
+            except Exception as e:
+                logger.exception("Failed to send file in PM: %s", e)
+                await query.message.reply_text(f"❌ Failed to send file: {e}")
+            return
+        else:
+            try:
+                await query.answer(url=f"https://t.me/{temp.U_NAME}?start=file_{query.message.chat.id}_{file_id}")
+            except Exception as e:
+                logger.error(f"Error answering file query: {e}")
+                await query.answer("⚡ Redirecting...")
+            return
 
     elif query.data.startswith("sendfiles"):
         clicked = query.from_user.id
         ident, key = query.data.split("#")
         settings = await get_settings(query.message.chat.id)
-        try:
-            await query.answer(url=f"https://telegram.me/{temp.U_NAME}?start=allfiles_{query.message.chat.id}_{key}")
+        if query.message.chat.type == enums.ChatType.PRIVATE:
+            await query.answer("⚡ Sending all requested files...")
+            files = temp.GETALL.get(key)
+            if not files:
+                return await query.message.reply_text('<b><i>ɴᴏ ꜱᴜᴄʜ ꜰɪʟᴇ ᴇxɪꜱᴛꜱ !</i></b>')
+            filesarr = []
+            for file in files:
+                f_id = file.file_id
+                f_details = await get_file_details(f_id)
+                files1 = f_details[0] if f_details else file
+                title = clean_filename(files1.file_name)
+                size = get_size(files1.file_size)
+                f_caption = getattr(files1, 'caption', '')
+                DREAMX_CAPTION = settings.get('caption', CUSTOM_FILE_CAPTION)
+                if DREAMX_CAPTION:
+                    try:
+                        f_caption = DREAMX_CAPTION.format(file_name='' if title is None else title, file_size='' if size is None else size, file_caption='' if f_caption is None else f_caption)
+                    except Exception:
+                        pass
+                if not f_caption:
+                    f_caption = f"<code>{title}</code>"
+                btn = [[InlineKeyboardButton('🍿 ᴏᴛᴛ ᴍᴏᴠɪᴇ ᴜᴘᴅᴀᴛᴇꜱ ᴄʜᴀɴɴᴇʟ 🍿', url=UPDATE_CHNL_LNK)]]
+                try:
+                    m = await client.send_cached_media(
+                        chat_id=query.from_user.id,
+                        file_id=f_id,
+                        caption=f_caption,
+                        protect_content=settings.get('file_secure', PROTECT_CONTENT),
+                        reply_markup=InlineKeyboardMarkup(btn)
+                    )
+                    filesarr.append(m)
+                except Exception as e:
+                    logger.exception("Failed to send file batch in PM: %s", e)
+            if filesarr:
+                del_msg = await client.send_message(chat_id=query.from_user.id, text=script.DEL_MSG.format(get_time(DELETE_TIME)), parse_mode=enums.ParseMode.HTML)
+                if settings.get('auto_delete', True):
+                    for x in filesarr:
+                        asyncio.create_task(_schedule_delete(x, del_msg, DELETE_TIME))
             return
-        except UserIsBlocked:
-            await query.answer('Uɴʙʟᴏᴄᴋ ᴛʜᴇ ʙᴏᴛ ᴍᴀʜɴ !', show_alert=True)
-        except PeerIdInvalid:
-            await query.answer(url=f"https://telegram.me/{temp.U_NAME}?start=sendfiles3_{key}")
-        except Exception as e:
-            logger.exception(e)
-            await query.answer(url=f"https://telegram.me/{temp.U_NAME}?start=sendfiles4_{key}")
+        else:
+            try:
+                await query.answer(url=f"https://telegram.me/{temp.U_NAME}?start=allfiles_{query.message.chat.id}_{key}")
+                return
+            except UserIsBlocked:
+                await query.answer('Uɴʙʟᴏᴄᴋ ᴛʜᴇ ʙᴏᴛ ᴍᴀʜɴ !', show_alert=True)
+            except PeerIdInvalid:
+                await query.answer(url=f"https://telegram.me/{temp.U_NAME}?start=sendfiles3_{key}")
+            except Exception as e:
+                logger.exception(e)
+                await query.answer(url=f"https://telegram.me/{temp.U_NAME}?start=sendfiles4_{key}")
 
     elif query.data.startswith("del"):
         ident, file_id = query.data.split("#")
@@ -921,7 +1077,7 @@ async def cb_handler(client: Client, query: CallbackQuery):
             f_caption = f_caption
         if f_caption is None:
             f_caption = f"{files.file_name}"
-        await query.answer(url=f"href='https://telegram.me/{temp.U_NAME}?start=file_{query.message.chat.id}_{file.file_id}")
+        await query.answer(url=f"https://telegram.me/{temp.U_NAME}?start=file_{query.message.chat.id}_{files.file_id}")
 
     elif query.data.startswith("autofilter_delete"):
         await Media.collection.drop()
@@ -1323,70 +1479,22 @@ async def cb_handler(client: Client, query: CallbackQuery):
             await query.answer("Yᴏᴜ ᴅᴏɴ'ᴛ ʜᴀᴠᴇ sᴜғғɪᴄɪᴀɴᴛ ʀɪɢᴛs ᴛᴏ ᴅᴏ ᴛʜɪs !", show_alert=True)
 
     elif query.data.startswith("alalert"):
-        ident, from_user = query.data.split("#")
-        if int(query.from_user.id) == int(from_user):
-            user = await client.get_users(from_user)
-            await query.answer(
-                f"Hᴇʏ {user.first_name}, Yᴏᴜʀ ʀᴇǫᴜᴇꜱᴛ ɪꜱ Aʟʀᴇᴀᴅʏ Aᴠᴀɪʟᴀʙʟᴇ ✅",
-                show_alert=True
-            )
-        else:
-            await query.answer("Yᴏᴜ ᴅᴏɴ'ᴛ ʜᴀᴠᴇ sᴜғғɪᴄɪᴇɴᴛ ʀɪɢʜᴛs ᴛᴏ ᴅᴏ ᴛʜɪs ❌", show_alert=True)
+        await query.answer("Hᴇʏ! Tʜɪꜱ ʀᴇǫᴜᴇꜱᴛ ɪꜱ Aʟʀᴇᴀᴅʏ Aᴠᴀɪʟᴀʙʟᴇ ✅", show_alert=True)
 
     elif query.data.startswith("upalert"):
-        ident, from_user = query.data.split("#")
-        if int(query.from_user.id) == int(from_user):
-            user = await client.get_users(from_user)
-            await query.answer(
-                f"Hᴇʏ {user.first_name}, Yᴏᴜʀ ʀᴇǫᴜᴇꜱᴛ ɪꜱ Uᴘʟᴏᴀᴅᴇᴅ 🔼",
-                show_alert=True
-            )
-        else:
-            await query.answer("Yᴏᴜ ᴅᴏɴ'ᴛ ʜᴀᴠᴇ sᴜғғɪᴄɪᴇɴᴛ ʀɪɢʜᴛs ᴛᴏ ᴅᴏ ᴛʜɪs ❌", show_alert=True)
+        await query.answer("Hᴇʏ! Tʜɪꜱ ʀᴇǫᴜᴇꜱᴛ ɪꜱ Uᴘʟᴏᴀᴅᴇᴅ 🔼", show_alert=True)
 
     elif query.data.startswith("unalert"):
-        ident, from_user = query.data.split("#")
-        if int(query.from_user.id) == int(from_user):
-            user = await client.get_users(from_user)
-            await query.answer(
-                f"Hᴇʏ {user.first_name}, Yᴏᴜʀ ʀᴇǫᴜᴇꜱᴛ ɪꜱ Uɴᴀᴠᴀɪʟᴀʙʟᴇ ⚠️",
-                show_alert=True
-            )
-        else:
-            await query.answer("Yᴏᴜ ᴅᴏɴ'ᴛ ʜᴀᴠᴇ sᴜғғɪᴄɪᴇɴᴛ ʀɪɢʜᴛs ᴛᴏ ᴅᴏ ᴛʜɪs ❌", show_alert=True)
+        await query.answer("Hᴇʏ! Tʜɪꜱ ʀᴇǫᴜᴇꜱᴛ ɪꜱ Uɴᴀᴠᴀɪʟᴀʙʟᴇ ⚠️", show_alert=True)
 
     elif query.data.startswith("hnalert"):
-        ident, from_user = query.data.split("#")  # Hindi Not Available
-        if int(query.from_user.id) == int(from_user):
-            user = await client.get_users(from_user)
-            await query.answer(
-                f"Hᴇʏ {user.first_name}, Tʜɪꜱ ɪꜱ Nᴏᴛ Aᴠᴀɪʟᴀʙʟᴇ ɪɴ Hɪɴᴅɪ ❌",
-                show_alert=True
-            )
-        else:
-            await query.answer("Nᴏᴛ ᴀʟʟᴏᴡᴇᴅ — ʏᴏᴜ ᴀʀᴇ ɴᴏᴛ ᴛʜᴇ ʀᴇǫᴜᴇꜱᴛᴇʀ ❌", show_alert=True)
+        await query.answer("Hᴇʏ! Tʜɪꜱ ɪꜱ Nᴏᴛ Aᴠᴀɪʟᴀʙʟᴇ ɪɴ Hɪɴᴅɪ ❌", show_alert=True)
 
     elif query.data.startswith("nralert"):
-        ident, from_user = query.data.split("#")  # Not Released
-        if int(query.from_user.id) == int(from_user):
-            user = await client.get_users(from_user)
-            await query.answer(
-                f"Hᴇʏ {user.first_name}, Tʜᴇ Mᴏᴠɪᴇ/ꜱʜᴏᴡ ɪꜱ Nᴏᴛ Rᴇʟᴇᴀꜱᴇᴅ Yᴇᴛ 🆕",
-                show_alert=True
-            )
-        else:
-            await query.answer("Yᴏᴜ ᴄᴀɴ'ᴛ ᴅᴏ ᴛʜɪꜱ ᴀꜱ ʏᴏᴜ ᴀʀᴇ ɴᴏᴛ ᴛʜᴇ ᴏʀɪɢɪɴᴀʟ ʀᴇǫᴜᴇꜱᴛᴇʀ ❌", show_alert=True)
+        await query.answer("Hᴇʏ! Tʜᴇ Mᴏᴠɪᴇ/ꜱʜᴏᴡ ɪꜱ Nᴏᴛ Rᴇʟᴇᴀꜱᴇᴅ Yᴇᴛ 🆕", show_alert=True)
 
     elif query.data.startswith("wsalert"):
-        ident, from_user = query.data.split("#")  # Wrong Spelling
-        if int(query.from_user.id) == int(from_user):
-            user = await client.get_users(from_user)
-            await query.answer(
-                f"Hᴇʏ {user.first_name}, Yᴏᴜʀ Rᴇǫᴜᴇꜱᴛ ᴡᴀꜱ ʀᴇᴊᴇᴄᴛᴇᴅ ᴅᴜᴇ ᴛᴏ ᴡʀᴏɴɢ sᴘᴇʟʟɪɴɢ ❗",
-                show_alert=True
-            )
-        else:
-            await query.answer("Yᴏᴜ ᴅᴏɴ'ᴛ ʜᴀᴠᴇ ᴘᴇʀᴍɪssɪᴏɴ ᴛᴏ sᴇᴇ ᴛʜɪꜱ ❌", show_alert=True)
+        await query.answer("Hᴇʏ! Pʟᴇᴀꜱᴇ ᴄʜᴇᴄᴋ ᴛʜᴇ sᴘᴇʟʟɪɴɢ ❗", show_alert=True)
 
     elif DreamxData.startswith("generate_stream_link"):
         _, file_id = DreamxData.split(":")
@@ -1413,7 +1521,7 @@ async def cb_handler(client: Client, query: CallbackQuery):
                         InlineKeyboardButton('🖥️ Watch ', url=dreamx_stream)
                     ],
                     [
-                        InlineKeyboardButton('📌 ᴊᴏɪɴ ᴜᴘᴅᴀᴛᴇꜱ ᴄʜᴀɴɴᴇʟ 📌', url=UPDATE_CHNL_LNK)
+                        InlineKeyboardButton('🍿 ᴏᴛᴛ ᴍᴏᴠɪᴇ ᴜᴘᴅᴀᴛᴇꜱ ᴄʜᴀɴɴᴇʟ 🍿', url=UPDATE_CHNL_LNK)
                     ]
                 ])
             )
@@ -1440,11 +1548,8 @@ async def cb_handler(client: Client, query: CallbackQuery):
         await dreamcinezone.delete()
 
 
-    elif query.data == "pagesn1":
-        await query.answer(text=script.PAGE_TXT, show_alert=True)
-
-    elif query.data == "sinfo":
-        await query.answer(text=script.SINFO, show_alert=True)
+    elif query.data in ["pagesn1", "sinfo"]:
+        await query.answer("📢 Please Share & Support Our Bot! ❤️", show_alert=True)
 
     elif query.data == "start":
         buttons = [[
@@ -1603,14 +1708,22 @@ async def cb_handler(client: Client, query: CallbackQuery):
                 InlineKeyboardButton('⇋ ʙᴀᴄᴋ ᴛᴏ ʜᴏᴍᴇ ⇋', callback_data='start')
             ]]
             reply_markup = InlineKeyboardMarkup(btn)
-            await client.edit_message_media(
-                chat_id=query.message.chat.id,
-                message_id=query.message.id,
-                media=InputMediaPhoto(media=SUBSCRIPTION, caption=script.BPREMIUM_TXT, parse_mode=enums.ParseMode.HTML),
-                reply_markup=reply_markup
-            )
+            try:
+                await client.edit_message_media(
+                    chat_id=query.message.chat.id,
+                    message_id=query.message.id,
+                    media=InputMediaPhoto(media=SUBSCRIPTION, caption=script.BPREMIUM_TXT, parse_mode=enums.ParseMode.HTML),
+                    reply_markup=reply_markup
+                )
+            except Exception:
+                await query.message.edit_text(text=script.BPREMIUM_TXT, reply_markup=reply_markup, parse_mode=enums.ParseMode.HTML)
+            await query.answer()
         except Exception as e:
-            logging.exception("Exception in 'premium_info' callback")
+            logging.exception("Exception in 'premium_info' callback: %s", e)
+            try:
+                await query.answer()
+            except Exception:
+                pass
 
 
     elif query.data == "buy_info":
@@ -1622,14 +1735,22 @@ async def cb_handler(client: Client, query: CallbackQuery):
                 InlineKeyboardButton('⇋ ʙᴀᴄᴋ ᴛᴏ ᴘʀᴇᴍɪᴜᴍ ⇋', callback_data='premium_info')
             ]]
             reply_markup = InlineKeyboardMarkup(btn)
-            await client.edit_message_media(
-                chat_id=query.message.chat.id,
-                message_id=query.message.id,
-                media=InputMediaPhoto(media=SUBSCRIPTION, caption=script.PREMIUM_TEXT, parse_mode=enums.ParseMode.HTML),
-                reply_markup=reply_markup
-            )
+            try:
+                await client.edit_message_media(
+                    chat_id=query.message.chat.id,
+                    message_id=query.message.id,
+                    media=InputMediaPhoto(media=SUBSCRIPTION, caption=script.PREMIUM_TEXT, parse_mode=enums.ParseMode.HTML),
+                    reply_markup=reply_markup
+                )
+            except Exception:
+                await query.message.edit_text(text=script.PREMIUM_TEXT, reply_markup=reply_markup, parse_mode=enums.ParseMode.HTML)
+            await query.answer()
         except Exception as e:
-            logging.exception("Exception in 'buy_info' callback")
+            logging.exception("Exception in 'buy_info' callback: %s", e)
+            try:
+                await query.answer()
+            except Exception:
+                pass
 
     elif query.data == "upi_info":
         try:
@@ -1639,14 +1760,22 @@ async def cb_handler(client: Client, query: CallbackQuery):
                 InlineKeyboardButton('⇋ ʙᴀᴄᴋ ⇋', callback_data='buy_info')
             ]]
             reply_markup = InlineKeyboardMarkup(btn)
-            await client.edit_message_media(
-                chat_id=query.message.chat.id,
-                message_id=query.message.id,
-                media=InputMediaPhoto(media=SUBSCRIPTION, caption=script.PREMIUM_UPI_TEXT.format(OWNER_UPI_ID), parse_mode=enums.ParseMode.HTML),
-                reply_markup=reply_markup
-            )
+            try:
+                await client.edit_message_media(
+                    chat_id=query.message.chat.id,
+                    message_id=query.message.id,
+                    media=InputMediaPhoto(media=SUBSCRIPTION, caption=script.PREMIUM_UPI_TEXT.format(OWNER_UPI_ID), parse_mode=enums.ParseMode.HTML),
+                    reply_markup=reply_markup
+                )
+            except Exception:
+                await query.message.edit_text(text=script.PREMIUM_UPI_TEXT.format(OWNER_UPI_ID), reply_markup=reply_markup, parse_mode=enums.ParseMode.HTML)
+            await query.answer()
         except Exception as e:
-            logging.exception("Exception in 'upi_info' callback")
+            logging.exception("Exception in 'upi_info' callback: %s", e)
+            try:
+                await query.answer()
+            except Exception:
+                pass
 
     elif query.data == "star_info":
         try:
@@ -1657,14 +1786,22 @@ async def cb_handler(client: Client, query: CallbackQuery):
             buttons = [btn[i:i + 2] for i in range(0, len(btn), 2)]
             buttons.append([InlineKeyboardButton("⋞ ʙᴀᴄᴋ", callback_data="buy_info")])
             reply_markup = InlineKeyboardMarkup(buttons)
-            await client.edit_message_media(
-                chat_id=query.message.chat.id,
-                message_id=query.message.id,
-                media=InputMediaPhoto(media=SUBSCRIPTION, caption=script.PREMIUM_STAR_TEXT, parse_mode=enums.ParseMode.HTML),
-                reply_markup=reply_markup
-            )
+            try:
+                await client.edit_message_media(
+                    chat_id=query.message.chat.id,
+                    message_id=query.message.id,
+                    media=InputMediaPhoto(media=SUBSCRIPTION, caption=script.PREMIUM_STAR_TEXT, parse_mode=enums.ParseMode.HTML),
+                    reply_markup=reply_markup
+                )
+            except Exception:
+                await query.message.edit_text(text=script.PREMIUM_STAR_TEXT, reply_markup=reply_markup, parse_mode=enums.ParseMode.HTML)
+            await query.answer()
         except Exception as e:
-            logging.exception("Exception in 'star' callback")
+            logging.exception("Exception in 'star' callback: %s", e)
+            try:
+                await query.answer()
+            except Exception:
+                pass
 
 
     elif query.data.startswith("grp_pm"):
@@ -1724,13 +1861,16 @@ async def cb_handler(client: Client, query: CallbackQuery):
             btn = await group_setting_buttons(int(grp_id))
             reply_markup = InlineKeyboardMarkup(btn)
             await query.message.edit_reply_markup(reply_markup)
-    await query.answer(MSG_ALRT)
+    else:
+        raise ContinuePropagation
 
 
 async def auto_filter(client, msg, spoll=False):
     """
     Core auto_filter logic with timing/debug logging removed.
     """
+    import time
+    start_time = getattr(msg, "start_time", None) or time.time()
     curr_time = datetime.now(pytz.timezone('Asia/Kolkata')).time()
 
     async def _schedule_delete(sent_obj, orig_msg, delay):
@@ -1769,7 +1909,11 @@ async def auto_filter(client, msg, spoll=False):
                 try:
                     m = await message.reply_sticker(sticker=stick_id, reply_markup=keyboard)
                 except Exception as e:
-                    logger.exception("reply_sticker failed: %s", e)
+                    logger.exception("reply_sticker failed, falling back to text: %s", e)
+                    try:
+                        m = await message.reply_text(f'🔎 sᴇᴀʀᴄʜɪɴɢ {search}', reply_markup=keyboard)
+                    except Exception:
+                        m = None
 
                 find = search.split(" ")
                 search = ""
@@ -1789,31 +1933,22 @@ async def auto_filter(client, msg, spoll=False):
 
                 settings = await get_settings(message.chat.id)
                 if not files:
-                    if settings.get("spell_check"):
-                        ai_sts = await m.edit('🤖 ᴘʟᴇᴀꜱᴇ ᴡᴀɪᴛ, ᴀɪ ɪꜱ ᴄʜᴇᴄᴋɪɴɢ ʏᴏᴜʀ ꜱᴘᴇʟʟɪɴɢ...')
-                        is_misspelled = await ai_spell_check(chat_id=message.chat.id, wrong_name=search)
-
-                        if is_misspelled:
-                            await ai_sts.edit(f'✅ Aɪ Sᴜɢɢᴇsᴛᴇᴅ: <code>{is_misspelled}</code>\n🔍 Searching for it...')
-                            message.text = is_misspelled
-                            await ai_sts.delete()
-                            return await auto_filter(client, message)
-                        await ai_sts.delete()
-                        result = await advantage_spell_chok(client, message)
-                        return result
-                    else:
+                    if m:
                         try:
-                            if m:
-                                await m.delete()
+                            await m.delete()
                         except Exception:
                             pass
-                        result = await advantage_spell_chok(client, message)
-                        return result
+                    result = await advantage_spell_chok(client, message)
+                    return result
+                
+                # Log success if files were found
+                if files:
+                    await ai_db.log_event("search_success", message.from_user.id if message.from_user else 0, search)
             else:
                 return
         else:
             # spoll branch
-            message = msg.message.reply_to_message
+            message = (msg.message.reply_to_message if (msg.message and msg.message.reply_to_message) else msg.message)
             search, files, offset, total_results = spoll
             m = await message.reply_text(f'🔎 sᴇᴀʀᴄʜɪɴɢ {search}', reply_to_message_id=message.id)
             settings = await get_settings(message.chat.id)
@@ -1870,6 +2005,23 @@ async def auto_filter(client, msg, spoll=False):
                                "Sᴇɴᴅ Aʟʟ", callback_data=f"sendfiles#{key}")
                        ])
 
+        # Similar Movie suggestions
+        try:
+            similar = await get_similar_movies(search)
+            if similar:
+                btn.append([InlineKeyboardButton("🎬 Sɪᴍɪʟᴀʀ Mᴏᴠɪᴇ Sᴜɢɢᴇsᴛɪᴏɴs 🎬", callback_data="hiding")])
+                row = []
+                for s in similar[:4]:
+                    trunc_s = s[:45]
+                    row.append(InlineKeyboardButton(f"🍿 {s}", callback_data=f"lsearch#{trunc_s}"))
+                    if len(row) == 2:
+                        btn.append(row)
+                        row = []
+                if row:
+                    btn.append(row)
+        except Exception as e:
+            logger.error("Failed to append similar movies buttons: %s", e)
+
         if offset != "":
             req = message.from_user.id if message.from_user else 0
             if ULTRA_FAST_MODE:
@@ -1900,7 +2052,8 @@ async def auto_filter(client, msg, spoll=False):
                 text="↭ ɴᴏ ᴍᴏʀᴇ ᴘᴀɢᴇꜱ ᴀᴠᴀɪʟᴀʙʟᴇ ↭", callback_data="pages")])
 
         if settings.get('imdb'):
-            imdb = await get_posterx(search, file=(files[0]).file_name) if TMDB_POSTERS else await get_poster(search, file=(files[0]).file_name)
+            from info import TMDB_POSTER
+            imdb = await get_posterx(search, file=(files[0]).file_name) if TMDB_POSTER else await get_poster(search, file=(files[0]).file_name)
         else:
             imdb = None
 
@@ -1916,6 +2069,13 @@ async def auto_filter(client, msg, spoll=False):
             TEMPLATE = settings['template']
 
         if imdb:
+            spoiler_free_summary = "N/A"
+            try:
+                summary = await get_spoiler_free_summary(search)
+                if summary:
+                    spoiler_free_summary = summary
+            except Exception:
+                pass
             cap = TEMPLATE.format(
                 query=search,
                 title=imdb['title'],
@@ -1948,6 +2108,8 @@ async def auto_filter(client, msg, spoll=False):
                 **locals()
             )
             temp.IMDB_CAP[message.from_user.id] = cap
+            if spoiler_free_summary and spoiler_free_summary != "N/A":
+                cap += f"\n\n<b>📝 Spoiler-Free Summary:</b> <i>{spoiler_free_summary}</i>"
             if not settings.get('button'):
                 cap += "\n\n<b><u>Your Requested Files Are Here</u></b>\n\n"
                 for idx, file in enumerate(files, start=1):
@@ -1972,28 +2134,14 @@ async def auto_filter(client, msg, spoll=False):
 
         sent = None
         try:
-            if imdb and imdb.get('poster'):
-                try:
-                    if TMDB_POSTERS:
-                        photo = imdb.get('backdrop') if imdb.get('backdrop') and LANDSCAPE_POSTER else imdb.get('poster')
-                    else:
-                        photo = imdb.get('poster')
-                    sent = await message.reply_photo(photo=photo, caption=cap, reply_markup=InlineKeyboardMarkup(btn), parse_mode=enums.ParseMode.HTML)
-                    if m:
-                        await m.delete()
-                except (MediaEmpty, PhotoInvalidDimensions, WebpageMediaEmpty):
-                    pic = imdb.get('poster')
-                    poster = pic.replace('.jpg', "._V1_UX360.jpg")
-                    sent = await message.reply_photo(photo=poster, caption=cap, reply_markup=InlineKeyboardMarkup(btn), parse_mode=enums.ParseMode.HTML)
-                    if m:
-                        await m.delete()
-                except Exception as e:
-                    logger.exception(e)
-                    sent = await message.reply_text(text=cap, reply_markup=InlineKeyboardMarkup(btn), disable_web_page_preview=True, parse_mode=enums.ParseMode.HTML)
-            else:
-                sent = await message.reply_text(text=cap, reply_markup=InlineKeyboardMarkup(btn), disable_web_page_preview=True, parse_mode=enums.ParseMode.HTML)
-                if m:
-                    await m.delete()
+            sent = await message.reply_text(
+                text=cap,
+                reply_markup=InlineKeyboardMarkup(btn),
+                disable_web_page_preview=True,
+                parse_mode=enums.ParseMode.HTML
+            )
+            if m:
+                await m.delete()
         except Exception as e:
             logger.exception("Failed to send result: %s", e)
             return
@@ -2041,28 +2189,27 @@ async def advantage_spell_chok(client, message):
         r"\b(pl(i|e)*?(s|z+|ease|se|ese|(e+)s(e)?)|((send|snd|giv(e)?|gib)(\sme)?)|movie(s)?|new|latest|br((o|u)h?)*|^h(e|a)?(l)*(o)*|mal(ayalam)?|t(h)?amil|file|that|find|und(o)*|kit(t(i|y)?)?o(w)?|thar(u)?(o)*w?|kittum(o)*|aya(k)*(um(o)*)?|full\smovie|any(one)|with\ssubtitle(s)?)",
         "", message.text, flags=re.IGNORECASE)
     query = query.strip() + " movie"
+    user_mention = message.from_user.mention if message.from_user else "User"
     try:
         movies = await get_poster(search, bulk=True)
     except:
-        k = await message.reply(script.I_CUDNT.format(message.from_user.mention))
+        k = await message.reply(script.I_CUDNT.format(user_mention))
         await asyncio.sleep(60)
-        await k.delete()
-        try:
-            await message.delete()
-        except:
-            pass
+        try: await k.delete()
+        except: pass
+        try: await message.delete()
+        except: pass
         return
     if not movies:
-        google = search.replace(" ", "+")
+        google = quote_plus(search)
         button = [[InlineKeyboardButton(
             "🔍 ᴄʜᴇᴄᴋ sᴘᴇʟʟɪɴɢ ᴏɴ ɢᴏᴏɢʟᴇ 🔍", url=f"https://www.google.com/search?q={google}")]]
         k = await message.reply_text(text=script.I_CUDNT.format(search), reply_markup=InlineKeyboardMarkup(button))
         await asyncio.sleep(60)
-        await k.delete()
-        try:
-            await message.delete()
-        except:
-            pass
+        try: await k.delete()
+        except: pass
+        try: await message.delete()
+        except: pass
         return
     user = message.from_user.id if message.from_user else 0
     buttons = [
@@ -2071,10 +2218,9 @@ async def advantage_spell_chok(client, message):
 
     buttons.append([InlineKeyboardButton(
         text="🚫 ᴄʟᴏsᴇ 🚫", callback_data='close_data')])
-    d = await message.reply_text(text=script.CUDNT_FND.format(message.from_user.mention), reply_markup=InlineKeyboardMarkup(buttons), reply_to_message_id=message.id)
+    d = await message.reply_text(text=script.CUDNT_FND.format(user_mention), reply_markup=InlineKeyboardMarkup(buttons), reply_to_message_id=message.id)
     await asyncio.sleep(60)
-    await d.delete()
-    try:
-        await message.delete()
-    except:
-        pass
+    try: await d.delete()
+    except: pass
+    try: await message.delete()
+    except: pass

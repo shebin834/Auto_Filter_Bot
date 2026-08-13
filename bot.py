@@ -2,11 +2,18 @@ import sys
 import glob
 import importlib
 from pathlib import Path
+import asyncio
+
+# Set up event loop before importing pyrogram to prevent RuntimeError on Python 3.10+
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 from pyrogram import Client, idle, __version__
 from pyrogram.raw.all import layer
 import time
 from pyrogram.errors import FloodWait
-import asyncio
 from datetime import date, datetime
 import pytz
 from aiohttp import web
@@ -16,6 +23,7 @@ from info import *
 from utils import temp
 from Script import script
 from plugins import web_server, check_expired_premium, keep_alive
+from plugins.backup import start_daily_backup_scheduler
 from dreamxbotz.Bot import dreamxbotz
 from dreamxbotz.util.keepalive import ping_server
 from dreamxbotz.Bot.clients import initialize_clients
@@ -43,17 +51,8 @@ async def dreamxbotz_start():
     bot_info = await dreamxbotz.get_me()
     dreamxbotz.username = bot_info.username
     await initialize_clients()
-    for name in files:
-        with open(name) as a:
-            patt = Path(a.name)
-            plugin_name = patt.stem.replace(".py", "")
-            plugins_dir = Path(f"plugins/{plugin_name}.py")
-            import_path = "plugins.{}".format(plugin_name)
-            spec = importlib.util.spec_from_file_location(import_path, plugins_dir)
-            load = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(load)
-            sys.modules["plugins." + plugin_name] = load
-            print("DreamxBotz Imported => " + plugin_name)
+    # Pyrogram native plugin loader (plugins={"root": "plugins"}) loads all plugins on dreamxbotz.start()
+    logging.info("Pyrogram native plugins loaded successfully.")
     if ON_HEROKU:
         asyncio.create_task(ping_server()) 
     b_users, b_chats = await db.get_banned()
@@ -79,12 +78,13 @@ async def dreamxbotz_start():
     today = date.today()
     now = datetime.now(tz)
     time = now.strftime("%H:%M:%S %p")
-    await dreamxbotz.send_message(chat_id=LOG_CHANNEL, text=script.RESTART_TXT.format(temp.B_LINK, today, time))
+#    await dreamxbotz.send_message(chat_id=LOG_CHANNEL, text=script.RESTART_TXT.format(temp.B_LINK, today, time))
     app = web.AppRunner(await web_server())
     await app.setup()
     bind_address = "0.0.0.0"
     await web.TCPSite(app, bind_address, PORT).start()
     dreamxbotz.loop.create_task(keep_alive())
+    dreamxbotz.loop.create_task(start_daily_backup_scheduler(dreamxbotz))
     await idle()
     
 if __name__ == '__main__':

@@ -3,6 +3,7 @@ import logging
 import asyncio
 from datetime import datetime
 from collections import defaultdict
+from urllib.parse import quote_plus
 from plugins.Dreamxfutures.Imdbposter import get_movie_detailsx, fetch_image, get_movie_details
 from database.users_chats_db import db
 from pyrogram import Client, filters, enums
@@ -276,9 +277,11 @@ async def _process_with_lock(bot, filename, caption, media_info, base_name, proc
             "genres": genres,
             "rating": details.get("rating", "N/A"),
             "imdb_url": details.get("url", "")if not TMDB_POSTER else details.get("tmdb_url"),
-            "year": media_info["year"] or details.get("year"),
+            "year": media_info["year"] or details.get("year") or "N/A",
             "tag": media_info["tag"],
             "ott_platform": media_info["ott_platform"],
+            "plot": details.get("plot") or "N/A",
+            "trailer_url": details.get("trailer_url"),
             "message_id": None,
             "is_photo": False
         }
@@ -307,6 +310,18 @@ async def _process_with_lock(bot, filename, caption, media_info, base_name, proc
         movie_doc["files"].append(file_data)
         schedule_update(bot, base_name)
 
+def get_update_buttons(base_name, movie_doc):
+    get_file_url = f"https://t.me/{temp.U_NAME}?start=getfile-{base_name.replace(' ', '-')}"
+    trailer_url = movie_doc.get("trailer_url") if movie_doc else None
+    if not trailer_url:
+        trailer_url = f"https://www.youtube.com/results?search_query={quote_plus(base_name + ' trailer')}"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton('🎬 GET FILES', url=get_file_url),
+            InlineKeyboardButton('▶️ TRAILER', url=trailer_url)
+        ]
+    ])
+
 async def send_movie_update(bot, base_name):
     max_retries = 3
     base_delay = 5
@@ -317,12 +332,7 @@ async def send_movie_update(bot, base_name):
                 return None
 
             text = generate_movie_message(movie_doc, base_name)
-            buttons = InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    'ɢᴇᴛ ғɪʟᴇs',
-                    url=f"https://t.me/{temp.U_NAME}?start=getfile-{base_name.replace(' ', '-')}"
-                )
-            ]])
+            buttons = get_update_buttons(base_name, movie_doc)
 
             if movie_doc.get("poster_url") and not LINK_PREVIEW:
                 resized_poster = await fetch_image(movie_doc["poster_url"], size=(2560, 1440) if LANDSCAPE_POSTER and TMDB_POSTER and not error_tmdb else (853, 1280))
@@ -366,12 +376,7 @@ async def update_movie_message(bot, base_name):
             return
 
         text = generate_movie_message(movie_doc, base_name)
-        buttons = InlineKeyboardMarkup([[
-            InlineKeyboardButton(
-                'ɢᴇᴛ ғɪʟᴇs',
-                url=f"https://t.me/{temp.U_NAME}?start=getfile-{base_name.replace(' ', '-')}"
-            )
-        ]])
+        buttons = get_update_buttons(base_name, movie_doc)
 
         message_id = movie_doc.get("message_id")
         is_photo = movie_doc.get("is_photo", False)
@@ -476,23 +481,30 @@ def generate_movie_message(movie_doc, base_name):
 
         epi_str = "\n".join(episode_lines)
         if epi_str:
-            epi_block = f"📺 ᴇᴘɪsᴏᴅᴇs : <b>\n{epi_str}</b>"
+            epi_block = f"📺 <b>EPISODES :</b>\n<b>{epi_str}</b>\n"
 
     genres = movie_doc.get("genres", "N/A")
-    quality_str = ", ".join(sorted(all_qualities)) if all_qualities else "N/A"
     language_str = ", ".join(sorted(all_languages)) if all_languages else "N/A"
     ott_str = ", ".join(sorted(all_ott_platforms)) if all_ott_platforms else "N/A"
 
+    plot = movie_doc.get("plot", "N/A")
+    if not plot or plot == "N/A":
+        plot = "No plot summary available."
+    elif len(plot) > 280:
+        plot = plot[:277].rsplit(' ', 1)[0] + "..."
+
+    rating = movie_doc.get("rating", "N/A")
+    year = movie_doc.get("year", "N/A")
+
     return script.MOVIE_UPDATE_NOTIFY_TXT.format(
-        poster_url=movie_doc.get("poster_url", ""),
-        imdb_url=movie_doc.get("imdb_url", ""),
-        filename=base_name,
         tag=primary_tag,
+        filename=base_name,
+        rating=rating,
+        year=year,
         genres=genres,
         ott=ott_str,
-        quality=quality_str,
         language=language_str,
         episodes=epi_block,
-        rating=movie_doc.get("rating", "N/A"),
-        search_link=temp.B_LINK
+        plot=plot,
+        bot_username=temp.U_NAME
     )

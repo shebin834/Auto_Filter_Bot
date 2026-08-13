@@ -1,3 +1,4 @@
+import time
 import logging
 from struct import pack
 import re
@@ -12,11 +13,38 @@ from marshmallow import ValidationError
 from info import *
 from utils import get_settings, save_group_settings
 from datetime import datetime, timedelta
-import logging
 import asyncio
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+# Ultra-Fast In-Memory Search Cache
+SEARCH_CACHE = {}
+SEARCH_CACHE_MAX_SIZE = 10000
+SEARCH_CACHE_TTL = 300  # 5 minutes in seconds
+
+def clear_search_cache():
+    global SEARCH_CACHE
+    SEARCH_CACHE.clear()
+
+def get_from_search_cache(cache_key: str):
+    if cache_key in SEARCH_CACHE:
+        ts, data = SEARCH_CACHE[cache_key]
+        if time.time() - ts < SEARCH_CACHE_TTL:
+            return data
+        else:
+            del SEARCH_CACHE[cache_key]
+    return None
+
+def put_in_search_cache(cache_key: str, data):
+    if len(SEARCH_CACHE) > SEARCH_CACHE_MAX_SIZE:
+        now = time.time()
+        expired = [k for k, (ts, _) in SEARCH_CACHE.items() if now - ts > SEARCH_CACHE_TTL]
+        for k in expired:
+            del SEARCH_CACHE[k]
+        if len(SEARCH_CACHE) > SEARCH_CACHE_MAX_SIZE:
+            SEARCH_CACHE.clear()
+    SEARCH_CACHE[cache_key] = (time.time(), data)
 # ---------------------------------------------------------
 
 # Global cache for DB size
@@ -136,7 +164,113 @@ async def save_file(media):
         )
         return False, 3
     logger.info(f"[SUCCESS] '{file_name}' saved to {target_db} DB.")
+    
+    # Invalidate search cache when new files arrive
+    clear_search_cache()
+    
+    # Asynchronously check and notify users who requested this movie
+    asyncio.create_task(notify_requested_users(file_name))
+    
     return True, 1
+
+# ----------------------------------------------------
+# AI ranking, personalization, deduplication helpers
+# ----------------------------------------------------
+def extract_quality(filename: str) -> int:
+    filename = filename.lower()
+    if "2160p" in filename or "4k" in filename:
+        return 5
+    if "1080p" in filename:
+        return 4
+    if "720p" in filename:
+        return 3
+    if "480p" in filename:
+        return 2
+    if "360p" in filename:
+        return 1
+    return 0
+
+def clean_title_only(filename: str) -> str:
+    name = filename.lower()
+    name = re.sub(r'\b(2160p|1080p|720p|480p|360p|4k|bluray|webrip|web-dl|hdr|hevc|x264|x265|dd5\.1|dual|hindi|tamil|english|malayalam|telugu|kannada)\b', '', name)
+    name = re.sub(r'\b(19|20)\d{2}\b', '', name)
+    name = re.sub(r'[^a-z0-9]', '', name)
+    return name.strip()
+
+async def rank_files(files, user_id=None):
+    if not files:
+        return []
+    interests = {}
+    if user_id and user_id > 0:
+        try:
+            from database.users_chats_db import db as udb
+            user_doc = await udb.col.find_one({"id": int(user_id)})
+            if user_doc:
+                interests = user_doc.get("interests", {})
+        except Exception as e:
+            logger.error("Failed to fetch user interests for ranking: %s", e)
+            
+    fav_langs = interests.get("languages", {})
+    fav_genres = interests.get("genres", {})
+    
+    def get_score(file):
+        score = 0
+        file_name = file.file_name.lower()
+        
+        # 1. Quality score
+        score += extract_quality(file_name) * 10
+        
+        # 2. Personalization boost
+        for lang, count in fav_langs.items():
+            if lang.lower() in file_name:
+                score += min(count, 5) * 5
+                
+        return score
+        
+    files.sort(key=get_score, reverse=True)
+    return files
+
+def deduplicate_files(files):
+    if not files:
+        return []
+    unique_files = []
+    seen_sizes = set()
+    seen_cleaned_names = set()
+    for file in files:
+        size = file.file_size
+        cleaned_name = clean_title_only(file.file_name)
+        if size in seen_sizes or (cleaned_name and cleaned_name in seen_cleaned_names):
+            continue
+        seen_sizes.add(size)
+        if cleaned_name:
+            seen_cleaned_names.add(cleaned_name)
+        unique_files.append(file)
+    return unique_files
+
+async def notify_requested_users(file_name: str):
+    try:
+        from dreamxbotz.Bot import dreamxbotz
+        from database.ai_db import ai_db
+        from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        
+        users = await ai_db.check_and_fulfill_requests(file_name)
+        for u in users:
+            try:
+                text = (
+                    f"<b>👋 Hey there!</b>\n\n"
+                    f"🎬 The movie you requested: <b>{file_name}</b> has been indexed and is now available! 🎉\n\n"
+                    f"👉 Click the button below to search and get it now."
+                )
+                button = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔍 Search Movie", url=f"https://t.me/{dreamxbotz.username}?start=getfile-{file_name.replace(' ', '-')[:40]}")]
+                ])
+                await dreamxbotz.send_message(chat_id=u["chat_id"], text=text, reply_markup=button)
+            except Exception as e:
+                logger.error("Failed to notify user %s for request of '%s': %s", u["user_id"], file_name, e)
+    except Exception as e:
+        logger.error("Error in notify_requested_users: %s", e)
+
+# ----------------------------------------------------
 
 async def get_search_results(chat_id, query, file_type=None, max_results=None, offset=0, filter=False):
     if chat_id is not None:
@@ -148,6 +282,12 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
                 await save_group_settings(int(chat_id), "max_btn", True)
                 settings = await get_settings(int(chat_id))
                 max_results = 10 if settings.get("max_btn") else int(MAX_B_TN)
+
+    query_str = str(query).strip().lower()
+    cache_key = f"{query_str}_{file_type}_{max_results}_{offset}_{chat_id}"
+    cached_res = get_from_search_cache(cache_key)
+    if cached_res is not None:
+        return cached_res
 
     # This is the new "middle-ground" regex logic for speed and flexibility
     if isinstance(query, list):
@@ -186,51 +326,30 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
     if file_type:
         filter_mongo["file_type"] = file_type
     
-    # The rest of the function remains the same, using parallel queries.
-    if ULTRA_FAST_MODE:
-        limit = max_results + 1
-        find_tasks = [Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(limit).to_list(length=limit)]
-        if MULTIPLE_DB:
-            find_tasks.append(Media2.find(filter_mongo).sort("$natural", -1).skip(offset).limit(limit).to_list(length=limit))
-        
-        results = await asyncio.gather(*find_tasks)
-        files = results[0]
-        if MULTIPLE_DB and len(results) > 1:
-            files.extend(results[1])
-        
-        files = files[:limit]
+    # Parallel queries without unindexed $natural table scans
+    limit = max_results * 2
+    find_tasks = [Media.find(filter_mongo).skip(offset).limit(limit).to_list(length=limit)]
+    if MULTIPLE_DB:
+        find_tasks.append(Media2.find(filter_mongo).skip(offset).limit(limit).to_list(length=limit))
+    
+    results = await asyncio.gather(*find_tasks)
+    files = results[0]
+    if MULTIPLE_DB and len(results) > 1:
+        files.extend(results[1])
+    
+    # Apply quality ranking & personalization & deduplication
+    files = await rank_files(files, chat_id)
+    files = deduplicate_files(files)
 
-        has_next_page = len(files) > max_results
-        if has_next_page:
-            files = files[:-1]
+    has_next_page = len(files) > max_results
+    files = files[:max_results]
 
-        next_offset = offset + len(files) if has_next_page else ""
-        total_results = offset + len(files) + (1 if has_next_page else 0)
-    else:
-        count_tasks = [Media.count_documents(filter_mongo)]
-        find_tasks = [Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(max_results).to_list(length=max_results)]
+    next_offset = offset + len(files) if has_next_page else ""
+    total_results = offset + len(files) + (1 if has_next_page else 0)
 
-        if MULTIPLE_DB:
-            count_tasks.append(Media2.count_documents(filter_mongo))
-            find_tasks.append(Media2.find(filter_mongo).sort("$natural", -1).skip(offset).limit(max_results).to_list(length=max_results))
-        
-        count_results, find_results = await asyncio.gather(
-            asyncio.gather(*count_tasks),
-            asyncio.gather(*find_tasks)
-        )
-        
-        total_results = sum(count_results)
-        files = find_results[0]
-        if MULTIPLE_DB and len(find_results) > 1:
-            files.extend(find_results[1])
-        
-        files = files[:max_results]
-        
-        next_offset = offset + len(files)
-        if next_offset >= total_results:
-            next_offset = ""
-
-    return files, next_offset, total_results
+    res = (files, next_offset, total_results)
+    put_in_search_cache(cache_key, res)
+    return res
 
 async def get_bad_files(query, file_type=None):
     query = query.strip()

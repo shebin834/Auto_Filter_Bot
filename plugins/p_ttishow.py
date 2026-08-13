@@ -164,7 +164,7 @@ async def get_stats(bot, message):
         totl_chats = await db.total_chat_count()
         premium = await db.all_premium_users()
         file1 = await Media.count_documents()
-        DB_SIZE = 512 * 1024 * 1024
+        DB_SIZE = 20480 * 1024 * 1024
         dbstats = await db_stats.command("dbStats")
         db_size = dbstats['dataSize'] + dbstats['indexSize']
         free = DB_SIZE - db_size
