@@ -9,7 +9,7 @@ from pyrogram import Client, filters, enums
 from pyrogram.types import Message
 
 from info import LOG_CHANNEL, ADMINS, COLLECTION_NAME, DATABASE_NAME
-from database.ia_filterdb import db
+from database.ia_filterdb import db as ia_db
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +20,12 @@ def write_batch_to_gzip(gz_file, batch):
 
 
 async def generate_backup_file(file_path: str) -> int:
-    total_docs = await db[COLLECTION_NAME].count_documents({})
+    total_docs = await ia_db[COLLECTION_NAME].count_documents({})
     loop = asyncio.get_running_loop()
 
     with gzip.open(file_path, 'wt', encoding='utf-8') as gz:
         batch = []
-        async for doc in db[COLLECTION_NAME].find({}):
+        async for doc in ia_db[COLLECTION_NAME].find({}):
             batch.append(doc)
             if len(batch) >= 5000:
                 await loop.run_in_executor(None, write_batch_to_gzip, gz, batch)

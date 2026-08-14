@@ -127,13 +127,13 @@ async def start(client, message):
             logger.error(f"Failed to log user to LOG_CHANNEL: {e}")
     if len(message.command) != 2:
         buttons = [[
-                    InlineKeyboardButton('🔰 ᴀᴅᴅ ᴍᴇ ᴛᴏ ʏᴏᴜʀ ɢʀᴏᴜᴘ 🔰', url=f'http://t.me/{temp.U_NAME}?startgroup=true')
+                    InlineKeyboardButton('👥 ᴀᴅᴅ ᴍᴇ ᴛᴏ ʏᴏᴜʀ ɢʀᴏᴜᴘ 👥', url=f'http://t.me/{temp.U_NAME}?startgroup=true')
                 ],[
-                    InlineKeyboardButton(' ʜᴇʟᴘ 📢', callback_data='help'),
-                    InlineKeyboardButton(' ᴀʙᴏᴜᴛ 📖', callback_data='about')
+                    InlineKeyboardButton('📢 ʜᴇʟᴘ & ᴄᴏᴍᴍᴀɴᴅs', callback_data='help'),
+                    InlineKeyboardButton('📖 ᴀʙᴏᴜᴛ ɪɴғᴏ', callback_data='about')
                 ],[
-                    InlineKeyboardButton('ᴛᴏᴘ sᴇᴀʀᴄʜɪɴɢ ⭐', callback_data="topsearch"),
-                    InlineKeyboardButton('ᴜᴘɢʀᴀᴅᴇ 🎟', callback_data="premium_info"),
+                    InlineKeyboardButton('⭐ ᴛᴏᴘ sᴇᴀʀᴄʜɪɴɢ', callback_data="topsearch"),
+                    InlineKeyboardButton('🎟 ᴜᴘɢʀᴀᴅᴇ ᴘʀᴇᴍɪᴜᴍ', callback_data="premium_info"),
                 ]]
         reply_markup = InlineKeyboardMarkup(buttons)
         current_time = datetime.now(pytz.timezone(TIMEZONE))

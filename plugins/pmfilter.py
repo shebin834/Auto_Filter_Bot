@@ -1,5 +1,5 @@
 from pyrogram import Client, filters, enums, ContinuePropagation
-from utils import get_size, is_subscribed, is_req_subscribed, group_setting_buttons, get_poster, get_posterx, temp, get_settings, save_group_settings, get_cap, imdb, is_check_admin, extract_request_content, log_error, clean_filename, generate_season_variations, clean_search_text
+from utils import get_size, is_subscribed, is_req_subscribed, group_setting_buttons, get_poster, get_posterx, temp, get_settings, save_group_settings, get_cap, imdb, is_check_admin, extract_request_content, log_error, clean_filename, generate_season_variations, clean_search_text, get_time, get_readable_time
 import tracemalloc
 from fuzzywuzzy import process
 from dreamxbotz.util.file_properties import get_name, get_hash
@@ -13,6 +13,7 @@ from database.config_db import mdb
 # ----------------------------------------------------
 from database.ai_db import ai_db
 from ai.ai_handler import (
+    ai_provider,
     is_user_rate_limited,
     get_ott_info,
     get_spoiler_free_summary,
@@ -20,34 +21,80 @@ from ai.ai_handler import (
 )
 
 _local_movie_titles_cache = set()
+_local_titles_map = {}
 _last_cache_refresh = None
 
 async def refresh_local_movies_cache():
-    global _local_movie_titles_cache, _last_cache_refresh
+    global _local_movie_titles_cache, _local_titles_map, _last_cache_refresh
     now = datetime.now()
-    if _last_cache_refresh is None or (now - _last_cache_refresh > timedelta(hours=6)):
+    if _last_cache_refresh is None or (now - _last_cache_refresh > timedelta(hours=2)):
         try:
-            titles = await dreamxbotz_get_movies(limit=1000)
-            _local_movie_titles_cache = set(titles)
+            from database.ia_filterdb import Media, Media2, clean_title_only
+            titles_set = set()
+            titles_map = {}
+            for col in [Media.collection, Media2.collection]:
+                try:
+                    cursor = col.find({}, {'file_name': 1}).sort('_id', -1).limit(10000)
+                    async for doc in cursor:
+                        fn = doc.get('file_name', '')
+                        if fn:
+                            base_title = re.sub(r'[\. \-_](19|20)\d{2}.*', '', fn, flags=re.IGNORECASE).replace('.', ' ').strip()
+                            if base_title and len(base_title) > 2:
+                                clean_key = clean_title_only(base_title)
+                                if clean_key and len(clean_key) > 2:
+                                    titles_set.add(clean_key)
+                                    titles_map[clean_key] = base_title
+                except Exception as e:
+                    logger.error("Error building title cache for collection: %s", e)
+            _local_movie_titles_cache = titles_set
+            _local_titles_map = titles_map
             _last_cache_refresh = now
-            logger.info("Refreshed local movies cache: %d titles loaded", len(titles))
+            logger.info("Refreshed local movies cache: %d titles indexed", len(titles_set))
         except Exception as e:
             logger.error("Failed to refresh local movies cache: %s", e)
 
 async def run_local_fuzzy_search(query: str) -> str:
-    from rapidfuzz import process, utils
-    await refresh_local_movies_cache()
-    if not _local_movie_titles_cache:
-        return None
+    from rapidfuzz import process, fuzz
+    from database.ia_filterdb import Media, Media2, clean_title_only
     try:
-        match = process.extractOne(
-            query, 
-            _local_movie_titles_cache, 
-            processor=utils.default_process,
-            score_cutoff=85.0
-        )
+        query_clean = clean_title_only(query)
+        if not query_clean or len(query_clean) < 3:
+            return None
+
+        prefix = query_clean[:5] if len(query_clean) >= 5 else query_clean[:4]
+        rx = re.compile(re.escape(prefix), re.IGNORECASE)
+
+        find_tasks = [
+            Media.find({'file_name': rx}).limit(100).to_list(100),
+            Media2.find({'file_name': rx}).limit(100).to_list(100)
+        ]
+        results = await asyncio.gather(*find_tasks)
+        all_docs = results[0] + results[1]
+
+        if not all_docs:
+            return None
+
+        candidates_set = set()
+        candidates_map = {}
+        for doc in all_docs:
+            fn = getattr(doc, 'file_name', '')
+            if fn:
+                base_title = re.sub(r'[\. \-_](19|20)\d{2}.*', '', fn, flags=re.IGNORECASE).replace('.', ' ').strip()
+                if base_title and len(base_title) > 2:
+                    clean_key = clean_title_only(base_title)
+                    if clean_key:
+                        candidates_set.add(clean_key)
+                        candidates_map[clean_key] = base_title
+
+        if not candidates_set:
+            return None
+
+        match = process.extractOne(query_clean, list(candidates_set), scorer=fuzz.ratio, score_cutoff=75.0)
         if match:
-            return match[0]
+            best_clean, score, _ = match
+            best_title = candidates_map.get(best_clean, best_clean)
+            logger.info("High-speed local fuzzy match for '%s' -> '%s' (score=%.1f)", query, best_title, score)
+            return best_title
     except Exception as e:
         logger.error("Error in run_local_fuzzy_search: %s", e)
     return None
@@ -251,10 +298,24 @@ async def refercall(bot, query):
         reply_markup=reply_markup,
         parse_mode=enums.ParseMode.HTML
     )
-    await query.answer()
+async def is_group_button_locked(query: CallbackQuery) -> bool:
+    if query.message and query.message.chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
+        reply_msg = query.message.reply_to_message
+        if reply_msg and reply_msg.from_user:
+            requester_id = reply_msg.from_user.id
+            if query.from_user.id != requester_id:
+                user_name = query.from_user.first_name or "User"
+                await query.answer(
+                    f"⚠️ Hey {user_name}, this is not your movie request! Search for your own movie in group.",
+                    show_alert=True
+                )
+                return True
+    return False
 
 @Client.on_callback_query(filters.regex(r"^next"))
 async def next_page(bot, query):
+    if await is_group_button_locked(query):
+        return
     ident, req, key, offset = query.data.split("_")
     curr_time = datetime.now(pytz.timezone('Asia/Kolkata')).time()
     try:
@@ -289,19 +350,19 @@ async def next_page(bot, query):
         btn.insert(0,
                    [
                        InlineKeyboardButton(
-                           f'Qᴜᴀʟɪᴛʏ', callback_data=f"qualities#{key}"),
+                           f'🎥 Qᴜᴀʟɪᴛʏ', callback_data=f"qualities#{key}"),
                        InlineKeyboardButton(
-                           "Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
+                           "🌐 Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
                        InlineKeyboardButton(
-                           "Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}")
+                           "📺 Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}")
                    ]
                    )
         btn.insert(0,
                    [
                        InlineKeyboardButton(
-                           "ʀᴇᴍᴏᴠᴇ ᴀᴅs", url=f"https://t.me/{temp.U_NAME}?start=premium"),
+                           "🚫 ʀᴇᴍᴏᴠᴇ ᴀᴅs", url=f"https://t.me/{temp.U_NAME}?start=premium"),
                        InlineKeyboardButton(
-                           "Sᴇɴᴅ Aʟʟ", callback_data=f"sendfiles#{key}")
+                           "⚡ Sᴇɴᴅ Aʟʟ", callback_data=f"sendfiles#{key}")
 
                    ]
                    )
@@ -311,17 +372,17 @@ async def next_page(bot, query):
         btn.insert(0,
                    [
                        InlineKeyboardButton(
-                           f'Qᴜᴀʟɪᴛʏ', callback_data=f"qualities#{key}"),
+                           f'🎥 Qᴜᴀʟɪᴛʏ', callback_data=f"qualities#{key}"),
                        InlineKeyboardButton(
-                           "Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
+                           "🌐 Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
                        InlineKeyboardButton(
-                           "Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}")
+                           "📺 Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}")
                    ]
                    )
         btn.insert(0, [
             InlineKeyboardButton(
-                "ʀᴇᴍᴏᴠᴇ ᴀᴅs", url=f"https://t.me/{temp.U_NAME}?start=premium"),
-            InlineKeyboardButton("Sᴇɴᴅ Aʟʟ", callback_data=f"sendfiles#{key}")
+                "🚫 ʀᴇᴍᴏᴠᴇ ᴀᴅs", url=f"https://t.me/{temp.U_NAME}?start=premium"),
+            InlineKeyboardButton("⚡ Sᴇɴᴅ Aʟʟ", callback_data=f"sendfiles#{key}")
         ])
     if ULTRA_FAST_MODE:
         if 0 < offset <= 10:
@@ -332,16 +393,16 @@ async def next_page(bot, query):
             off_set = offset - 10
         if n_offset == 0:
             btn.append(
-                [InlineKeyboardButton("⋞ ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{off_set}"), InlineKeyboardButton(f"{math.ceil(int(offset)/10)+1}", callback_data="pages")]
+                [InlineKeyboardButton("⏪ ⋞ ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{off_set}"), InlineKeyboardButton(f"📍 {math.ceil(int(offset)/10)+1}", callback_data="pages")]
             )
         elif off_set is None:
-            btn.append([InlineKeyboardButton("ᴘᴀɢᴇ", callback_data="pages"), InlineKeyboardButton(f"{math.ceil(int(offset)/10)+1}", callback_data="pages"), InlineKeyboardButton("ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{n_offset}")])
+            btn.append([InlineKeyboardButton("📑 ᴘᴀɢᴇ", callback_data="pages"), InlineKeyboardButton(f"📍 {math.ceil(int(offset)/10)+1}", callback_data="pages"), InlineKeyboardButton("⏩ ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{n_offset}")])
         else:
             btn.append(
                 [
-                    InlineKeyboardButton("⋞ ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{off_set}"),
-                    InlineKeyboardButton(f"{math.ceil(int(offset)/10)+1}", callback_data="pages"),
-                    InlineKeyboardButton("ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{n_offset}")
+                    InlineKeyboardButton("⏪ ⋞ ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{off_set}"),
+                    InlineKeyboardButton(f"📍 {math.ceil(int(offset)/10)+1}", callback_data="pages"),
+                    InlineKeyboardButton("⏩ ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{n_offset}")
                 ],
             )
     else:
@@ -929,6 +990,8 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
 
 @Client.on_callback_query()
 async def cb_handler(client: Client, query: CallbackQuery):
+    if await is_group_button_locked(query):
+        return
     logger.info(f"DEBUG cb_handler: RECEIVED CALLBACK DATA = {query.data} FROM USER = {query.from_user.id}")
     DreamxData = query.data
     try:
@@ -959,48 +1022,12 @@ async def cb_handler(client: Client, query: CallbackQuery):
         # Track file download interest in background
         asyncio.create_task(track_file_download_interest(query.from_user.id, file_id))
         
-        if query.message.chat.type == enums.ChatType.PRIVATE:
-            await query.answer("⚡ Sending requested file...")
-            files_ = await get_file_details(file_id)
-            if not files_:
-                return await query.message.reply_text('<b><i>ɴᴏ ꜱᴜᴄʜ ꜰɪʟᴇ ᴇxɪꜱᴛꜱ !</i></b>')
-            files = files_[0]
-            title = clean_filename(files.file_name)
-            size = get_size(files.file_size)
-            f_caption = files.caption
-            settings = await get_settings(query.message.chat.id)
-            DREAMX_CAPTION = settings.get('caption', CUSTOM_FILE_CAPTION)
-            if DREAMX_CAPTION:
-                try:
-                    f_caption = DREAMX_CAPTION.format(file_name='' if title is None else title, file_size='' if size is None else size, file_caption='' if f_caption is None else f_caption)
-                except Exception as e:
-                    logger.exception(e)
-            if not f_caption:
-                f_caption = f"<code>{title}</code>"
-            
-            btn = [[InlineKeyboardButton('🍿 ᴏᴛᴛ ᴍᴏᴠɪᴇ ᴜᴘᴅᴀᴛᴇꜱ ᴄʜᴀɴɴᴇʟ 🍿', url=UPDATE_CHNL_LNK)]]
-            try:
-                msg = await client.send_cached_media(
-                    chat_id=query.from_user.id,
-                    file_id=files.file_id,
-                    caption=f_caption,
-                    protect_content=settings.get('file_secure', PROTECT_CONTENT),
-                    reply_markup=InlineKeyboardMarkup(btn)
-                )
-                del_msg = await msg.reply(script.DEL_MSG.format(get_time(DELETE_TIME)), quote=True, parse_mode=enums.ParseMode.HTML)
-                if settings.get('auto_delete', True):
-                    asyncio.create_task(_schedule_delete(msg, del_msg, DELETE_TIME))
-            except Exception as e:
-                logger.exception("Failed to send file in PM: %s", e)
-                await query.message.reply_text(f"❌ Failed to send file: {e}")
-            return
-        else:
-            try:
-                await query.answer(url=f"https://t.me/{temp.U_NAME}?start=file_{query.message.chat.id}_{file_id}")
-            except Exception as e:
-                logger.error(f"Error answering file query: {e}")
-                await query.answer("⚡ Redirecting...")
-            return
+        try:
+            await query.answer(url=f"https://t.me/{temp.U_NAME}?start=file_{query.message.chat.id}_{file_id}")
+        except Exception as e:
+            logger.error(f"Error answering file query: {e}")
+            await query.answer("⚡ Redirecting...")
+        return
 
     elif query.data.startswith("sendfiles"):
         clicked = query.from_user.id
@@ -1932,13 +1959,25 @@ async def auto_filter(client, msg, spoll=False):
                 files, offset, total_results = await get_search_results(message.chat.id, search, offset=0, filter=True)
 
                 settings = await get_settings(message.chat.id)
+                corrected_suggestion = None
+                if not files:
+                    # Pure local RapidFuzz spellcheck/fuzzy match in memory (latency <0.005s)
+                    fuzzy_corrected = await run_local_fuzzy_search(search)
+                    if fuzzy_corrected and fuzzy_corrected.lower() != search.lower():
+                        f_files, f_offset, f_total = await get_search_results(message.chat.id, fuzzy_corrected, offset=0, filter=True)
+                        if f_files:
+                            files, offset, total_results = f_files, f_offset, f_total
+                            search = fuzzy_corrected
+                        else:
+                            corrected_suggestion = fuzzy_corrected
+
                 if not files:
                     if m:
                         try:
                             await m.delete()
                         except Exception:
                             pass
-                    result = await advantage_spell_chok(client, message)
+                    result = await advantage_spell_chok(client, message, corrected_suggestion=corrected_suggestion)
                     return result
                 
                 # Log success if files were found
@@ -1972,19 +2011,19 @@ async def auto_filter(client, msg, spoll=False):
             btn.insert(0,
                        [
                            InlineKeyboardButton(
-                               f'Qᴜᴀʟɪᴛʏ', callback_data=f"qualities#{key}"),
+                               f'🎥 Qᴜᴀʟɪᴛʏ', callback_data=f"qualities#{key}"),
                            InlineKeyboardButton(
-                               "Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
+                               "🌐 Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
                            InlineKeyboardButton(
-                               "Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}")
+                               "📺 Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}")
                        ]
                        )
             btn.insert(0,
                        [
                            InlineKeyboardButton(
-                               "ʀᴇᴍᴏᴠᴇ ᴀᴅs", url=f"https://t.me/{temp.U_NAME}?start=premium"),
+                               "🚫 ʀᴇᴍᴏᴠᴇ ᴀᴅs", url=f"https://t.me/{temp.U_NAME}?start=premium"),
                            InlineKeyboardButton(
-                               "Sᴇɴᴅ Aʟʟ", callback_data=f"sendfiles#{key}")
+                               "⚡ Sᴇɴᴅ Aʟʟ", callback_data=f"sendfiles#{key}")
 
                        ])
         else:
@@ -1992,19 +2031,19 @@ async def auto_filter(client, msg, spoll=False):
             btn.insert(0,
                        [
                            InlineKeyboardButton(
-                               f'Qᴜᴀʟɪᴛʏ', callback_data=f"qualities#{key}"),
+                               f'🎥 Qᴜᴀʟɪᴛʏ', callback_data=f"qualities#{key}"),
                            InlineKeyboardButton(
-                               "Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
+                               "🌐 Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
                            InlineKeyboardButton(
-                               "Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}")
+                               "📺 Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}")
                        ]
                        )
             btn.insert(0,
                        [
                            InlineKeyboardButton(
-                               "ʀᴇᴍᴏᴠᴇ ᴀᴅs", url=f"https://t.me/{temp.U_NAME}?start=premium"),
+                               "🚫 ʀᴇᴍᴏᴠᴇ ᴀᴅs", url=f"https://t.me/{temp.U_NAME}?start=premium"),
                            InlineKeyboardButton(
-                               "Sᴇɴᴅ Aʟʟ", callback_data=f"sendfiles#{key}")
+                               "⚡ Sᴇɴᴅ Aʟʟ", callback_data=f"sendfiles#{key}")
                        ])
 
         # Similar Movie suggestions
@@ -2182,47 +2221,35 @@ async def ai_spell_check(chat_id, wrong_name):
         movie_list.remove(movie)
 
 
-async def advantage_spell_chok(client, message):
-    mv_id = message.id
-    search = message.text
-    chat_id = message.chat.id
-    settings = await get_settings(chat_id)
-    query = re.sub(
-        r"\b(pl(i|e)*?(s|z+|ease|se|ese|(e+)s(e)?)|((send|snd|giv(e)?|gib)(\sme)?)|movie(s)?|new|latest|br((o|u)h?)*|^h(e|a)?(l)*(o)*|mal(ayalam)?|t(h)?amil|file|that|find|und(o)*|kit(t(i|y)?)?o(w)?|thar(u)?(o)*w?|kittum(o)*|aya(k)*(um(o)*)?|full\smovie|any(one)|with\ssubtitle(s)?)",
-        "", message.text, flags=re.IGNORECASE)
-    query = query.strip() + " movie"
+async def advantage_spell_chok(client, message, corrected_suggestion=None):
+    search = message.text if message.text else ""
     user_mention = message.from_user.mention if message.from_user else "User"
-    try:
-        movies = await get_poster(search, bulk=True)
-    except:
-        k = await message.reply(script.I_CUDNT.format(user_mention))
-        await asyncio.sleep(60)
-        try: await k.delete()
-        except: pass
-        try: await message.delete()
-        except: pass
-        return
-    if not movies:
-        google = quote_plus(search)
-        button = [[InlineKeyboardButton(
-            "🔍 ᴄʜᴇᴄᴋ sᴘᴇʟʟɪɴɢ ᴏɴ ɢᴏᴏɢʟᴇ 🔍", url=f"https://www.google.com/search?q={google}")]]
-        k = await message.reply_text(text=script.I_CUDNT.format(search), reply_markup=InlineKeyboardMarkup(button))
-        await asyncio.sleep(60)
-        try: await k.delete()
-        except: pass
-        try: await message.delete()
-        except: pass
-        return
-    user = message.from_user.id if message.from_user else 0
-    buttons = [
-        [InlineKeyboardButton(text=movie.get('title'), callback_data=f"spol#{movie.movieID}#{user}")
-         ] for movie in movies]
+    google_url = f"https://www.google.com/search?q={quote_plus(search)}"
+    from info import OWNER_LNK
 
-    buttons.append([InlineKeyboardButton(
-        text="🚫 ᴄʟᴏsᴇ 🚫", callback_data='close_data')])
-    d = await message.reply_text(text=script.CUDNT_FND.format(user_mention), reply_markup=InlineKeyboardMarkup(buttons), reply_to_message_id=message.id)
-    await asyncio.sleep(60)
-    try: await d.delete()
-    except: pass
-    try: await message.delete()
-    except: pass
+    buttons = [
+        [InlineKeyboardButton("🔍 ᴄʜᴇᴄᴋ sᴘᴇʟʟɪɴɢ ᴏɴ ɢᴏᴏɢʟᴇ 🔍", url=google_url)],
+        [
+            InlineKeyboardButton("📩 Rᴇǫᴜᴇsᴛ Mᴏᴠɪᴇ", url=OWNER_LNK),
+            InlineKeyboardButton("❌ Cʟᴏsᴇ", callback_data="close_data")
+        ]
+    ]
+
+    if corrected_suggestion:
+        text = (
+            f"❌ <b>No files found for '<code>{search}</code>' in database.</b>\n\n"
+            f"💡 <b>Did you mean:</b> <code>{corrected_suggestion}</code>?\n\n"
+            f"<i>(This movie is not currently uploaded in our database. Click below to search Google or request from Admin.)</i>"
+        )
+    else:
+        text = (
+            f"<b>Sorry {user_mention}, no files were found for your request '<code>{search}</code>' 😕</b>\n\n"
+            f"Please check your spelling on Google or request the movie from Admin!"
+        )
+
+    return await message.reply_text(
+        text=text,
+        reply_markup=InlineKeyboardMarkup(buttons),
+        reply_to_message_id=message.id,
+        parse_mode=enums.ParseMode.HTML
+    )

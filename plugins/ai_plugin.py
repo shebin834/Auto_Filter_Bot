@@ -551,21 +551,24 @@ async def ai_chat_assistant(client: Client, message: Message):
         response = await ai_provider.chat(prompt)
         elapsed = time.time() - start_time
         
-        premium_chat_response = (
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🤖 <b>FilmFox AI Chat</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"🎯 AI Confidence : High\n\n"
-            f"{response}\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🤖 Powered by FilmFox AI\n"
-            f"⚡ Response Time: {elapsed:.2f} sec\n"
-            f"━━━━━━━━━━━━━━━━━━━━"
-        )
-        await status_msg.edit_text(premium_chat_response, parse_mode=enums.ParseMode.HTML)
+        if response.startswith("⚠️"):
+            await status_msg.edit_text(response, parse_mode=enums.ParseMode.HTML)
+        else:
+            premium_chat_response = (
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"🤖 <b>FilmFox AI Chat</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🎯 AI Confidence : High\n\n"
+                f"{response}\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"🤖 Powered by FilmFox AI\n"
+                f"⚡ Response Time: {elapsed:.2f} sec\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
+            )
+            await status_msg.edit_text(premium_chat_response, parse_mode=enums.ParseMode.HTML)
     except Exception as e:
         logger.error("Error in AI chat assistant command: %s", e)
-        await status_msg.edit_text("<b>❌ An error occurred while communicating with the AI.</b>")
+        await status_msg.edit_text("<b>❌ An error occurred while communicating with the AI. Please ensure GEMINI_API_KEY in info.py is valid.</b>")
 
 # ----------------------------------------------------
 # Guess the Movie Command `/guess`

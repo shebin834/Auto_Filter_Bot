@@ -17,8 +17,18 @@ from typing import Union, Optional, AsyncGenerator
 from pyrogram import types
 from aiohttp import web
 
-from pyrogram import Client
-from info import *
+from collections import OrderedDict
+from pyrogram.dispatcher import Dispatcher
+
+def _sync_add_handler(self, handler, group: int = 0):
+    if group not in self.groups:
+        self.groups[group] = []
+        self.groups = OrderedDict(sorted(self.groups.items()))
+    if handler not in self.groups[group]:
+        self.groups[group].append(handler)
+    return handler, group
+
+Dispatcher.add_handler = _sync_add_handler
 
 
 class dreamcinezoneXBot(Client):

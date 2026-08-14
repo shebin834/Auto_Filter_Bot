@@ -21,7 +21,27 @@ logger.setLevel(logging.INFO)
 # Ultra-Fast In-Memory Search Cache
 SEARCH_CACHE = {}
 SEARCH_CACHE_MAX_SIZE = 10000
-SEARCH_CACHE_TTL = 300  # 5 minutes in seconds
+SEARCH_CACHE_TTL = 1800  # 30 minutes in seconds
+
+_user_interests_cache = {}
+
+async def _get_cached_user_interests(user_id: int):
+    if not user_id or user_id <= 0:
+        return {}
+    now = time.time()
+    if user_id in _user_interests_cache:
+        ts, data = _user_interests_cache[user_id]
+        if now - ts < 300:  # 5 minutes
+            return data
+    try:
+        from database.users_chats_db import db as udb
+        user_doc = await udb.col.find_one({"id": int(user_id)})
+        interests = user_doc.get("interests", {}) if user_doc else {}
+        _user_interests_cache[user_id] = (now, interests)
+        return interests
+    except Exception as e:
+        logger.error("Failed to fetch user interests for ranking: %s", e)
+        return {}
 
 def clear_search_cache():
     global SEARCH_CACHE
@@ -304,14 +324,11 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
         if not query:
             return [], None, 0
             
-        # This is the key change for balancing speed and flexibility
-        if ' ' in query:
-            # For multi-word queries, allow spaces, dots, or hyphens between words.
-            words = [re.escape(word) for word in query.split()]
-            raw_pattern = r'.*'.join(words)
+        words = [re.escape(word) for word in query.split() if word]
+        if len(words) > 1:
+            raw_pattern = r'[\. \-_]?'.join(words)
         else:
-            # For single-word queries, use word boundaries for accuracy.
-            raw_pattern = r"\b" + re.escape(query) + r"\b"
+            raw_pattern = re.escape(query)
 
         try:
             regex = re.compile(raw_pattern, flags=re.IGNORECASE)

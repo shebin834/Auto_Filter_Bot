@@ -51,8 +51,8 @@ async def dreamxbotz_start():
     bot_info = await dreamxbotz.get_me()
     dreamxbotz.username = bot_info.username
     await initialize_clients()
-    # Pyrogram native plugin loader (plugins={"root": "plugins"}) loads all plugins on dreamxbotz.start()
-    logging.info("Pyrogram native plugins loaded successfully.")
+    total_handlers = sum(len(h) for h in dreamxbotz.dispatcher.groups.values())
+    logging.info(f"Pyrogram native plugins loaded successfully. Total handlers: {total_handlers}")
     if ON_HEROKU:
         asyncio.create_task(ping_server()) 
     b_users, b_chats = await db.get_banned()

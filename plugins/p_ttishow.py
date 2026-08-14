@@ -3,7 +3,7 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from pyrogram.errors.exceptions.bad_request_400 import MessageTooLong, PeerIdInvalid
 from info import ADMINS,MULTIPLE_DB, LOG_CHANNEL, OWNER_LNK, MELCOW_PHOTO
 from database.users_chats_db import db, db2
-from database.ia_filterdb import Media, Media2, db as db_stats, db2 as db2_stats
+from database.ia_filterdb import Media, Media2, db as ia_db_stats, db2 as ia_db2_stats
 from utils import get_size, temp, get_settings, get_readable_time
 from Script import script
 from pyrogram.errors import ChatAdminRequired
@@ -165,7 +165,7 @@ async def get_stats(bot, message):
         premium = await db.all_premium_users()
         file1 = await Media.count_documents()
         DB_SIZE = 20480 * 1024 * 1024
-        dbstats = await db_stats.command("dbStats")
+        dbstats = await ia_db_stats.command("dbStats")
         db_size = dbstats['dataSize'] + dbstats['indexSize']
         free = DB_SIZE - db_size
         uptime = get_readable_time(time() - botStartTime)
@@ -176,7 +176,7 @@ async def get_stats(bot, message):
                 total_users, totl_chats, premium, file1, get_size(db_size), get_size(free), uptime, ram, cpu))                                               
             return
         file2 = await Media2.count_documents()
-        db2stats = await db2_stats.command("dbStats")
+        db2stats = await ia_db2_stats.command("dbStats")
         db2_size = db2stats['dataSize'] + db2stats['indexSize']
         free2 = DB_SIZE - db2_size
         await msg.edit(script.MULTI_STATUS_TXT.format(

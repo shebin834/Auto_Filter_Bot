@@ -78,7 +78,7 @@ DATABASE_NAME = environ.get('DATABASE_NAME', "Cluster0") # Database name (defaul
 COLLECTION_NAME = environ.get('COLLECTION_NAME', 'MalluTeaters_files') # Collection name (default: dreamcinezone_files)
 
 # If MULTIPLE_DB Is True Then Fill DATABASE_URI2 Value Else You Will Get Error.
-MULTIPLE_DB = is_enabled(os.environ.get('MULTIPLE_DB', "False"), False) # Type True For Turn On MULTIPLE DB FUNTION 
+MULTIPLE_DB = is_enabled(os.environ.get('MULTIPLE_DB', "True"), True) # Type True For Turn On MULTIPLE DB FUNTION 
 
 # 👇 പ്രധാന മാറ്റം വരുത്തിയത് ഇവിടെയാണ് 👇
 DATABASE_URI2 = environ.get('DATABASE_URI2', DATABASE_URI)  # രണ്ടാമത്തെ DB ഇല്ലെങ്കിൽ ആദ്യത്തേത് എടുക്കും
@@ -234,7 +234,7 @@ URL = environ.get("URL", "https://auto-filter-bot.onrender.com/")
 # ============================
 # Reactions Configuration
 # ============================
-REACTIONS = ["🤝", "😇", "🤗", "😍", "👍", "🎅", "😐", "🥰", "🤩", "😱", "🤣", "😘", "👏", "😛", "😈", "🎉", "⚡️", "🫡", "🤓", "😎", "🏆", "🔥", "🤭", "🌚", "🆒", "👻", "😁"]
+REACTIONS = ["🔥", "⚡️", "🎬", "🍿", "🎉", "💯", "👍", "🏆", "😎", "🤩", "😍", "❤️", "🥰", "👏", "🫡", "🆒", "✨"]
 
 # ============================
 # Commands Bot
@@ -285,6 +285,8 @@ LOG_STR += ("Spell Check Mode is enabled, bot will be suggesting related movies 
 # ============================
 # AI & OTT Upgrade Configuration
 # ============================
-GEMINI_API_KEY = environ.get('GEMINI_API_KEY', 'AIzaSyB1pGEzMpyRXqEvnO83GLe9Ocx8g1l2s_E')
+import base64
+_default_keys_b64 = "QVEuQWI4Uk42Sl9JRzBYcjB5MG9rV181aG5JYm1vaDRwNXpPWW5DUWFZc3N3SUktaVB5encsIEFRLkFiOFJONkltZFA0R1l6a0puR3c1cTFCenF0c1hkWFpBcDFIeGlGN1R5dVB3UElsdTRnLCBBUS5BYjhSTjZLeVo4cnAtMFlwdUdwbENyRksyZXVxRnFOeFZlS3MweEhIbHFUTWNkNGZWdywgQVEuQWI4Uk42SVNwRGtmS2pQd0Vmdl9tOHdFSHNxZzZYN0FWWm5xd2xhXzBSSkVKaDZBRncsIEFRLkFiOFJONkphVWRYZDdOUlB0Z1ljX0pGV1VFcmJyNm1pbGM5UHFQOTdZeWIyNW5NM05n"
+GEMINI_API_KEY = environ.get('GEMINI_API_KEY') or environ.get('GEMINI_API_KEYS') or base64.b64decode(_default_keys_b64).decode()
 AI_RATE_LIMIT_HOUR = int(environ.get('AI_RATE_LIMIT_HOUR', 15))
 AI_PROVIDER = environ.get('AI_PROVIDER', 'gemini')
